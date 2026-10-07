@@ -76,6 +76,7 @@ public class SshClient extends BaseObject implements Closeable {
 	private volatile IHostKeyVerifier hostKeyVerifier;
 	private volatile String version = SshTransport.DEFAULT_VERSION;
 	private volatile long connectTimeout = DEFAULT_CONNECT_TIMEOUT;
+	private volatile long keepAliveInterval;
 
 	public SshClient() {
 		getLogger().setLevel(Server.getDefaultLogLevel());
@@ -194,6 +195,19 @@ public class SshClient extends BaseObject implements Closeable {
 	 */
 	public void setVersion(String version) {
 		this.version = version;
+	}
+
+	public long getKeepAliveInterval() {
+		return keepAliveInterval;
+	}
+
+	/**
+	 * @param milliSeconds send a keep-alive after this long without traffic, 0 (default) for 
+	 * none; a session that doesn't answer three in a row is disconnected. Applies to new sessions.
+	 */
+	public void setKeepAliveInterval(long milliSeconds) {
+		this.keepAliveInterval = milliSeconds;
+		nio.setMaxIdleTime(milliSeconds);
 	}
 
 	public long getConnectTimeout() {

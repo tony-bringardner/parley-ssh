@@ -93,6 +93,53 @@ public class OpenSshIT {
 		assertTrue(worked.size() >= 10, "worked: "+worked);
 	}
 
+	/**
+	 * Wrong credentials for a user that doesn't exist: OpenSSH answers each request (a 
+	 * malformed one would get a disconnect) and the login fails cleanly.
+	 */
+	@Test
+	public void failedLogin() throws Exception {
+		try (SshClient c = new SshClient()) {
+			c.setHostKeyVerifier(HostKeyVerifiers.acceptAll());
+			ClientSession s = c.connectAndWait(HOST, PORT);
+			java.security.KeyPairGenerator g = java.security.KeyPairGenerator.getInstance("EC");
+			g.initialize(256);
+			SshException e = org.junit.jupiter.api.Assertions.assertThrows(SshException.class, () -> s.authenticateAndWait("bjl-no-such-user",
+					new PublicKeyAuth(g.generateKeyPair()), KeyboardInteractiveAuth.password("not-a-password".toCharArray())));
+			assertTrue(e.getReason() == SshConstants.SSH_DISCONNECT_NO_MORE_AUTH_METHODS_AVAILABLE
+					|| e.getMessage().contains("Too many"), e.toString());
+			System.out.println("OpenSSH login failure: "+e.getMessage());
+			s.close();
+		}
+	}
+
+	/**
+	 * A real login, only when asked for: -Dbjl.ssh.it.user=name -Dbjl.ssh.it.key=~/.ssh/id_ecdsa 
+	 * (an unencrypted or PEM / PKCS8 key whose public key is in the user's authorized_keys).
+	 */
+	@Test
+	public void realLogin() throws Exception {
+		String user = System.getProperty("bjl.ssh.it.user");
+		String key = System.getProperty("bjl.ssh.it.key");
+		Assumptions.assumeTrue(user != null && key != null, "set bjl.ssh.it.user and bjl.ssh.it.key for a real login");
+		String pass = System.getProperty("bjl.ssh.it.passphrase");
+		java.security.KeyPair kp = us.bringardner.net.ssh.keys.SshKeyLoader.load(new java.io.File(key), pass == null ? null : pass.toCharArray());
+		try (SshClient c = new SshClient()) {
+			ClientSession s = c.connectAndWait(HOST, PORT);
+			s.authPublicKey(user, kp);
+			assertTrue(s.isAuthenticated());
+			s.rekey().get(10, TimeUnit.SECONDS);
+			ExecResult r = s.exec("echo hello; echo oops >&2; exit 7", null, 20000);
+			assertEquals("hello\n", r.getStdoutText());
+			assertEquals("oops\n", r.getStderrText());
+			assertEquals(7, r.getExitStatus());
+			byte[] data = new byte[3*1024*1024];
+			new java.util.Random(3).nextBytes(data);
+			org.junit.jupiter.api.Assertions.assertArrayEquals(data, s.exec("cat", data, 60000).getStdout());
+			s.close();
+		}
+	}
+
 	private static void run(SshAlgorithms a, String what, List<String> worked, List<String> notOffered) throws Exception {
 		try {
 			connect(a);

@@ -61,7 +61,7 @@ public class MinaInteropTest {
 		sshd.setHost("localhost");
 		sshd.setPort(0);
 		sshd.setKeyPairProvider(KeyPairProvider.wrap(rsa, ec256, ec384, ec521));
-		sshd.setPasswordAuthenticator((user, password, session) -> false);
+		sshd.setPasswordAuthenticator((user, password, session) -> "test".equals(user) && "test".equals(password));
 		sshd.start();
 		port = sshd.getPort();
 	}
@@ -152,16 +152,23 @@ public class MinaInteropTest {
 			assertEquals(4, s.getKexCount());
 			assertArrayEquals(session, s.getSessionId(), "the session id is the first exchange hash");
 
-			// Re-key every 256 KB while about 2.5 MB of IGNORE packets flow (packets sent during a
-			// key exchange wait and go out together after it, so not one re-key per 256 KB)
+			// Re-key every 256 KB: not before the login (OpenSSH refuses that)...
 			s.setRekeyBytes(256*1024);
+			for (int i = 0; i < 100; i++) {
+				s.send(SshBuffer.message(SshConstants.SSH_MSG_IGNORE).putString(new byte[10000]));
+			}
+			s.authenticateAndWait("test", new PasswordAuth("test"));
+			assertEquals(4, s.getKexCount(), "no automatic re-key before the login");
+
+			// ...after it, while about 2.5 MB of IGNORE packets flow (packets sent during a key
+			// exchange wait and go out together after it, so not one re-key per 256 KB)
 			for (int i = 0; i < 1000; i++) {
 				byte[] junk = new byte[r.nextInt(i % 50 == 0 ? 30000 : 4000)];
 				r.nextBytes(junk);
 				s.send(SshBuffer.message(SshConstants.SSH_MSG_IGNORE).putString(junk));
 			}
-			s.requestService(SshConstants.SERVICE_USERAUTH).get(20, TimeUnit.SECONDS);
-			assertTrue(s.getKexCount() >= 7, "at least 3 automatic re-keys: "+s.getKexCount());
+			s.rekey().get(20, TimeUnit.SECONDS);
+			assertTrue(s.getKexCount() >= 8, "at least 3 automatic re-keys: "+s.getKexCount());
 			assertTrue(s.isOpen());
 			s.close();
 		}

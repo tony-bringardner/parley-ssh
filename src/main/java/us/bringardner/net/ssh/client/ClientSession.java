@@ -30,10 +30,17 @@ import java.security.PublicKey;
 import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.function.Consumer;
 
+import us.bringardner.net.framework.nio.INioConnection;
 import us.bringardner.net.ssh.SshBuffer;
+import us.bringardner.net.ssh.connection.ConnectionService;
 import us.bringardner.net.ssh.SshConstants;
 import us.bringardner.net.ssh.SshException;
 import us.bringardner.net.ssh.algorithms.ISignatureAlgorithm;
@@ -59,6 +66,18 @@ public class ClientSession extends SshTransport {
 	// One service request at a time (RFC 4253 10)
 	private CompletableFuture<Void> serviceRequest;
 	private String requestedService;
+	// user authentication
+	private volatile UserAuthClient auth;
+	private volatile boolean userAuthAccepted;
+	private volatile boolean authenticated;
+	private volatile String authenticatedUser;
+	private volatile Consumer<String> bannerListener;
+	private volatile long authTimeout = 60000;
+	// connection protocol
+	private final ConnectionService connection = new ConnectionService(this);
+	private volatile long channelTimeout = 30000;
+	private volatile int maxKeepAliveFailures = 3;
+	private final java.util.concurrent.atomic.AtomicInteger unansweredKeepAlives = new java.util.concurrent.atomic.AtomicInteger();
 
 	protected ClientSession(String host, int port, IHostKeyVerifier verifier, SshAlgorithms algorithms, String version, SecureRandom random) {
 		super(true, algorithms, version, random);
@@ -112,8 +131,304 @@ public class ClientSession extends SshTransport {
 		return ret;
 	}
 
+	// ------------------------------------------------------------------ user authentication
+
+	/**
+	 * Log in (RFC 4252), trying the methods in order (those the server allows) until one 
+	 * succeeds. Asks for the ssh-userauth service first if needed. May be called again after 
+	 * a failure, e.g. with other credentials.
+	 * 
+	 * @param user the user name on the server
+	 * @param methods e.g. new PublicKeyAuth(keys), new PasswordAuth(password)
+	 * @return completes once authenticated; fails with an SshException 
+	 * (SSH_DISCONNECT_NO_MORE_AUTH_METHODS_AVAILABLE) if no method worked, the session stays open
+	 */
+	public CompletableFuture<Void> authenticate(String user, IClientAuthMethod... methods) {
+		UserAuthClient a;
+		synchronized (this) {
+			if( authenticated ) {
+				CompletableFuture<Void> ret = new CompletableFuture<Void>();
+				ret.completeExceptionally(new IllegalStateException("Already authenticated as "+authenticatedUser));
+				return ret;
+			}
+			UserAuthClient old = auth;
+			if( old != null && !old.getResult().isDone() ) {
+				CompletableFuture<Void> ret = new CompletableFuture<Void>();
+				ret.completeExceptionally(new IllegalStateException("Authentication is already running"));
+				return ret;
+			}
+			a = new UserAuthClient(this, user, java.util.Arrays.asList(methods));
+			auth = a;
+		}
+		CompletableFuture<Void> service = userAuthAccepted ? CompletableFuture.completedFuture(null)
+				: requestService(SshConstants.SERVICE_USERAUTH);
+		service.whenComplete((v, error) -> {
+			if( error != null ) {
+				a.fail(error);
+				return;
+			}
+			userAuthAccepted = true;
+			try {
+				a.start();
+			} catch (IOException e) {
+				a.fail(e);
+			}
+		});
+		return a.getResult().thenRun(() -> {
+			authenticatedUser = user;
+			authenticated = true;
+		});
+	}
+
+	/**
+	 * {@link #authenticate(String, IClientAuthMethod...)} and wait (up to the auth timeout).
+	 * 
+	 * @throws IOException why it failed (an SshException)
+	 */
+	public void authenticateAndWait(String user, IClientAuthMethod... methods) throws IOException {
+		await(authenticate(user, methods), authTimeout, "Authentication");
+	}
+
+	/**
+	 * Log in with a password ("password", then "keyboard-interactive" for PAM servers).
+	 */
+	public void authPassword(String user, char[] password) throws IOException {
+		authenticateAndWait(user, new PasswordAuth(password), KeyboardInteractiveAuth.password(password));
+	}
+
+	/**
+	 * Log in with keys ("publickey").
+	 */
+	public void authPublicKey(String user, java.security.KeyPair... keys) throws IOException {
+		authenticateAndWait(user, new PublicKeyAuth(keys));
+	}
+
+	public boolean isAuthenticated() {
+		return authenticated;
+	}
+
+	/**
+	 * @return the user name that logged in, null before
+	 */
+	public String getAuthenticatedUser() {
+		return authenticatedUser;
+	}
+
+	/**
+	 * @param listener gets the server's SSH_MSG_USERAUTH_BANNER text (e.g. a legal notice); 
+	 * without one, banners are logged
+	 */
+	public void setBannerListener(Consumer<String> listener) {
+		this.bannerListener = listener;
+	}
+
+	public long getAuthTimeout() {
+		return authTimeout;
+	}
+
+	public void setAuthTimeout(long milliSeconds) {
+		this.authTimeout = milliSeconds;
+	}
+
+	/**
+	 * @return the signature algorithms the server accepts for public keys (RFC 8308 
+	 * server-sig-algs), empty if it didn't say
+	 */
+	public List<String> getServerSignatureAlgorithms() {
+		byte[] v = getPeerExtensions().get("server-sig-algs");
+		if( v == null ) {
+			return Collections.emptyList();
+		}
+		return java.util.Arrays.asList(new String(v, java.nio.charset.StandardCharsets.US_ASCII).split(","));
+	}
+
+	@Override
+	protected boolean isAutomaticRekeyAllowed() {
+		return authenticated;
+	}
+
+	static <T> T await(CompletableFuture<T> f, long timeout, String what) throws IOException {
+		try {
+			return timeout > 0 ? f.get(timeout, TimeUnit.MILLISECONDS) : f.get();
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+			throw new java.io.InterruptedIOException(what+" interrupted");
+		} catch (TimeoutException e) {
+			throw new java.net.SocketTimeoutException(what+" took more than "+timeout+" ms");
+		} catch (ExecutionException e) {
+			Throwable cause = e.getCause();
+			if( cause instanceof IOException ) {
+				throw (IOException) cause;
+			}
+			throw new IOException(what+" failed: "+cause, cause);
+		}
+	}
+
+	private boolean handleAuthMessage(int msg, SshBuffer message) throws Exception {
+		if( msg == SshConstants.SSH_MSG_USERAUTH_BANNER ) {
+			String text = message.getStringUtf8();
+			Consumer<String> l = bannerListener;
+			if( l != null ) {
+				l.accept(text);
+			} else {
+				logInfo("Banner from "+host+": "+text);
+			}
+			return true;
+		}
+		UserAuthClient a = auth;
+		if( a == null || a.getResult().isDone() ) {
+			throw new SshException("Unexpected "+SshConstants.messageName(msg));
+		}
+		switch (msg) {
+		case SshConstants.SSH_MSG_USERAUTH_SUCCESS:
+			a.onSuccess();
+			return true;
+		case SshConstants.SSH_MSG_USERAUTH_FAILURE:
+			List<String> canContinue = message.getNameList();
+			boolean partial = message.getBoolean();
+			a.onFailure(canContinue, partial);
+			return true;
+		default:
+			if( !a.handle(msg, message) ) {
+				throw new SshException("Unexpected "+SshConstants.messageName(msg)+" during authentication");
+			}
+			return true;
+		}
+	}
+
+	// ------------------------------------------------------------------ channels
+
+	/**
+	 * @return the connection protocol: open other channel types, send global requests, 
+	 * accept channels the server opens
+	 */
+	public ConnectionService getConnectionService() {
+		return connection;
+	}
+
+	/**
+	 * Open a "session" channel (for exec, shell or a subsystem). Needs a login first.
+	 */
+	public SessionChannel openSession() throws IOException {
+		return openChannel(new SessionChannel());
+	}
+
+	/**
+	 * Open a channel and wait for the server to confirm it.
+	 */
+	public <C extends us.bringardner.net.ssh.connection.SshChannel> C openChannel(C channel) throws IOException {
+		if( !authenticated ) {
+			throw new IllegalStateException("Not authenticated");
+		}
+		return await(connection.open(channel), channelTimeout, "Opening a "+channel.getType()+" channel");
+	}
+
+	/**
+	 * Run a command and collect what it writes, like "ssh host command".
+	 * 
+	 * @param command the command line
+	 * @param stdin sent to the command, then EOF; null for none
+	 * @param timeout ms for the whole run, 0 for no limit
+	 * @throws IOException if the channel or the command can't start, or the time runs out
+	 */
+	public ExecResult exec(String command, byte[] stdin, long timeout) throws IOException {
+		SessionChannel ch = openSession();
+		Thread writer = null;
+		try {
+			ch.exec(command);
+			if( stdin != null && stdin.length > 0 ) {
+				// Written while the output is read: a command that echoes its input (cat) would
+				// otherwise fill our window and stop reading, and the write would wait forever
+				writer = new Thread(() -> {
+					try {
+						ch.getOutputStream().write(stdin);
+						ch.sendEof();
+					} catch (IOException e) {
+						logDebug("Writing stdin of '"+command+"' failed", e);
+					}
+				}, "SshExec-stdin");
+				writer.setDaemon(true);
+				writer.start();
+			} else {
+				ch.sendEof();
+			}
+			java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+			java.io.ByteArrayOutputStream err = new java.io.ByteArrayOutputStream();
+			long start = System.currentTimeMillis();
+			ch.drain(out, err, timeout);
+			long left = timeout > 0 ? Math.max(1, timeout-(System.currentTimeMillis()-start)) : Long.MAX_VALUE;
+			// exit-status may come just after EOF
+			if( !ch.waitForClose(left, TimeUnit.MILLISECONDS) ) {
+				throw new java.net.SocketTimeoutException("'"+command+"' didn't finish within "+timeout+" ms");
+			}
+			return new ExecResult(ch.getExitStatus(), ch.getExitSignal(), out.toByteArray(), err.toByteArray());
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+			throw new java.io.InterruptedIOException();
+		} finally {
+			ch.close();
+			if( writer != null ) {
+				// The closed channel wakes a writer waiting for the window
+				writer.interrupt();
+			}
+		}
+	}
+
+	public long getChannelTimeout() {
+		return channelTimeout;
+	}
+
+	/**
+	 * @param milliSeconds how long opening a channel waits for the server
+	 */
+	public void setChannelTimeout(long milliSeconds) {
+		this.channelTimeout = milliSeconds;
+	}
+
+	public int getMaxKeepAliveFailures() {
+		return maxKeepAliveFailures;
+	}
+
+	/**
+	 * @param n disconnect after this many keep-alives in a row get no answer
+	 */
+	public void setMaxKeepAliveFailures(int n) {
+		this.maxKeepAliveFailures = n;
+	}
+
+	/**
+	 * Nothing came or went for the keep-alive interval (SshClient.setKeepAliveInterval): send 
+	 * keepalive@openssh.com. Any answer (OpenSSH answers failure) shows the server is there.
+	 */
+	@Override
+	public void onIdle(INioConnection c) {
+		if( !isReady() || !isOpen() ) {
+			c.close();
+			return;
+		}
+		if( unansweredKeepAlives.incrementAndGet() > maxKeepAliveFailures ) {
+			logError("No answer to "+maxKeepAliveFailures+" keep-alives from "+host+", disconnecting");
+			disconnect(SshConstants.SSH_DISCONNECT_CONNECTION_LOST, "No answer to keep-alives");
+			return;
+		}
+		connection.sendGlobalRequest("keepalive@openssh.com", true, null).whenComplete((r, error) -> {
+			if( error == null ) {
+				unansweredKeepAlives.set(0);
+			}
+		});
+	}
+
 	@Override
 	protected boolean handleMessage(int msg, SshBuffer message) throws Exception {
+		if( msg >= SshConstants.SSH_MSG_USERAUTH_REQUEST && msg < SshConstants.SSH_MSG_GLOBAL_REQUEST ) {
+			return handleAuthMessage(msg, message);
+		}
+		if( msg >= SshConstants.SSH_MSG_GLOBAL_REQUEST && msg <= SshConstants.SSH_MSG_CHANNEL_FAILURE ) {
+			if( !authenticated ) {
+				throw new SshException("Unexpected "+SshConstants.messageName(msg)+" before authentication");
+			}
+			return connection.handle(msg, message);
+		}
 		if( msg == SshConstants.SSH_MSG_SERVICE_ACCEPT ) {
 			String name = message.getStringUtf8();
 			CompletableFuture<Void> f;
@@ -147,6 +462,11 @@ public class ClientSession extends SshTransport {
 		if( f != null ) {
 			f.completeExceptionally(reason);
 		}
+		UserAuthClient a = auth;
+		if( a != null ) {
+			a.fail(reason);
+		}
+		connection.closeAll(reason);
 	}
 
 	/**

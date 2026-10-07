@@ -210,6 +210,14 @@ public abstract class SshTransport extends BaseObject implements INioHandler {
 	}
 
 	/**
+	 * @return true if re-keying may start by itself (data or time limit). A client says no 
+	 * until it is authenticated: OpenSSH refuses to re-key before a login.
+	 */
+	protected boolean isAutomaticRekeyAllowed() {
+		return true;
+	}
+
+	/**
 	 * The peer sent SSH_MSG_EXT_INFO (RFC 8308), e.g. the server's server-sig-algs.
 	 */
 	protected void onExtensions(Map<String, byte[]> extensions) {
@@ -639,7 +647,7 @@ public abstract class SshTransport extends BaseObject implements INioHandler {
 	 * Start a key exchange if enough data or time has gone by. Called as packets go in and out.
 	 */
 	private void checkRekey() throws IOException {
-		if( !firstKexDone || kexRunning ) {
+		if( !firstKexDone || kexRunning || !isAutomaticRekeyAllowed() ) {
 			return;
 		}
 		boolean due = encoder.getBytesSinceKeys() > rekeyBytes || decoder.getBytesSinceKeys() > rekeyBytes
