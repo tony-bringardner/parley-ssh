@@ -62,7 +62,7 @@ public class CertificateTest {
 		}
 	}
 
-	static KeyPair ec(String curve) throws Exception {
+	public static KeyPair ec(String curve) throws Exception {
 		KeyPairGenerator g = KeyPairGenerator.getInstance("EC");
 		g.initialize(new ECGenParameterSpec(curve));
 		return g.generateKeyPair();
@@ -89,7 +89,7 @@ public class CertificateTest {
 		return ext;
 	}
 
-	static SshCertificate user(KeyPair key, KeyPair ca, Map<String, String> critical, Map<String, String> ext, String... principals) throws Exception {
+	public static SshCertificate user(KeyPair key, KeyPair ca, Map<String, String> critical, Map<String, String> ext, String... principals) throws Exception {
 		return SshCertificate.sign(key.getPublic(), SshCertificate.USER, "test-id", Arrays.asList(principals), NOW-60, NOW+3600, critical, ext, ca);
 	}
 

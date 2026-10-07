@@ -137,7 +137,7 @@ public class ServerTest {
 		s.setPasswordAuthenticator((user, pw, ctx) -> "alice".equals(user) && "secret".equals(new String(pw)) ? new SshPrincipal(user) : null);
 		File keys = new File(dir, "authorized_keys");
 		Files.write(keys.toPath(), (SshPublicKeys.toOpenSsh(alicesKey.getPublic())+" alice@test\n"
-				+"command=\"/bin/false\" "+SshPublicKeys.toOpenSsh(strangersKey.getPublic())+"\n").getBytes(StandardCharsets.UTF_8));
+				+"no-such-option,command=\"/bin/false\" "+SshPublicKeys.toOpenSsh(strangersKey.getPublic())+"\n").getBytes(StandardCharsets.UTF_8));
 		s.setPublicKeyAuthenticator(new AuthorizedKeysAuthenticator(user -> "alice".equals(user) ? keys : null));
 		s.setCommandFactory((line, env) -> command(line));
 		s.setShellFactory(env -> shell());
@@ -198,7 +198,7 @@ public class ServerTest {
 	public void loginMethods() throws Exception {
 		start().startAndWait(5000);
 		ClientSession s = connect(null);
-		// The stranger's key is in the file but with options: not used
+		// The stranger's key is in the file but with an option the server doesn't know: not used
 		s.authenticateAndWait("alice", new PublicKeyAuth(strangersKey, alicesKey));
 		// EXT_INFO follows the server's NEWKEYS; by the time a login is done it has arrived
 		assertTrue(s.getServerSignatureAlgorithms().contains("rsa-sha2-512"), "server-sig-algs is sent");

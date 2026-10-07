@@ -62,6 +62,7 @@ public class ServerSession extends SshTransport {
 	private final SshServer server;
 	private final ConnectionService connection;
 	private final ServerForwarding forwarding;
+	private final ServerAgentForwarding agentForwarding = new ServerAgentForwarding(this);
 	private final Map<String, Object> attributes = new ConcurrentHashMap<String, Object>();
 	private volatile boolean authenticated;
 	private volatile String user;
@@ -155,12 +156,33 @@ public class ServerSession extends SshTransport {
 	}
 
 	/**
-	 * @param extension e.g. {@link SshCertificate#PERMIT_PTY}
-	 * @return true unless the user logged in with a certificate that doesn't have it
+	 * @return what the key the user logged in with may do (its authorized_keys options and
+	 * certificate); {@link KeyRestrictions#NONE} for other logins
 	 */
-	public boolean isPermittedByCertificate(String extension) {
-		SshCertificate c = getLoginCertificate();
-		return c == null || c.hasExtension(extension);
+	ServerAgentForwarding getAgentForwarding() {
+		return agentForwarding;
+	}
+
+	/**
+	 * @return true if the client forwarded its agent to this session (ssh -A)
+	 */
+	public boolean isAgentForwarded() {
+		return agentForwarding.isEnabled();
+	}
+
+	/**
+	 * Use the client's forwarded agent from Java code on the server (e.g. to log in to
+	 * another server with the user's keys): a new channel to the client's agent.
+	 *
+	 * @throws us.bringardner.parley.ssh.SshException if the client didn't forward its agent
+	 */
+	public us.bringardner.parley.ssh.client.SshAgent openForwardedAgent() throws IOException {
+		return agentForwarding.open();
+	}
+
+	public KeyRestrictions getKeyRestrictions() {
+		KeyRestrictions r = authenticated ? (KeyRestrictions) attributes.get(PublicKeyAuthMethod.RESTRICTIONS) : null;
+		return r == null ? KeyRestrictions.NONE : r;
 	}
 
 	/**
@@ -280,6 +302,7 @@ public class ServerSession extends SshTransport {
 		}
 		connection.closeAll(reason);
 		forwarding.close();
+		agentForwarding.close();
 	}
 
 	// ------------------------------------------------------------------ messages

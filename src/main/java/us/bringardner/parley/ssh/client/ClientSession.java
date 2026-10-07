@@ -92,6 +92,47 @@ public class ClientSession extends SshTransport {
 		this.port = port;
 		this.verifier = verifier;
 		connection.addChannelFactory(us.bringardner.parley.ssh.connection.ForwardingChannel.FORWARDED, (type, data) -> forwarded(data));
+		connection.addChannelFactory(us.bringardner.parley.ssh.connection.AgentChannel.TYPE, (type, data) -> agentChannel());
+	}
+
+	// null: agent forwarding off; "": the user's agent (SSH_AUTH_SOCK); else the agent's path
+	private volatile String forwardedAgent;
+
+	/**
+	 * Allow the server to use an SSH agent through this session once a session channel asks
+	 * for it ({@link SessionChannel#requestAgentForwarding()}). Off by default: the server's
+	 * agent channels are refused.
+	 *
+	 * @param agentPath the agent's socket or pipe, "" for the user's agent, null to turn it off
+	 */
+	public void setAgentForwarding(String agentPath) {
+		this.forwardedAgent = agentPath;
+	}
+
+	public void setAgentForwarding(boolean on) {
+		setAgentForwarding(on ? "" : null);
+	}
+
+	/**
+	 * The server opened an agent channel: connect it to the agent, if forwarding is on.
+	 */
+	private us.bringardner.parley.ssh.connection.AgentChannel agentChannel() {
+		String path = forwardedAgent;
+		if( path == null ) {
+			logInfo("Refused an agent channel from "+host+": agent forwarding is off");
+			return null;
+		}
+		us.bringardner.parley.ssh.connection.AgentChannel ch = new us.bringardner.parley.ssh.connection.AgentChannel();
+		ch.setOnOpen(() -> executor.execute(() -> {
+			try {
+				SshAgent a = path.isEmpty() ? SshAgent.connect() : SshAgent.connect(path);
+				ch.bridge(a.rawInput(), a.rawOutput(), a.rawCloseable(), executor);
+			} catch (IOException e) {
+				logDebug("Can't reach the SSH agent to forward: "+e.getMessage());
+				ch.close();
+			}
+		}));
+		return ch;
 	}
 
 	/**

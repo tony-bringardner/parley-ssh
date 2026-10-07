@@ -114,6 +114,7 @@ public class KnownHosts extends BaseObject implements IHostKeyVerifier {
 	private volatile boolean hashNewHosts = true;
 	private volatile List<Entry> entries = Collections.emptyList();
 	private final SecureRandom random = new SecureRandom();
+	private volatile us.bringardner.parley.ssh.keys.KeyRevocationList revoked;
 
 	/**
 	 * @param file the known_hosts file (it need not exist)
@@ -157,6 +158,15 @@ public class KnownHosts extends BaseObject implements IHostKeyVerifier {
 	 */
 	public KnownHosts setHashNewHosts(boolean hash) {
 		this.hashNewHosts = hash;
+		return this;
+	}
+
+	/**
+	 * @param revoked host keys and certificates to refuse (OpenSSH's RevokedHostKeys: a KRL or
+	 * a list of keys), on top of @revoked lines; null for none
+	 */
+	public KnownHosts setRevokedHostKeys(us.bringardner.parley.ssh.keys.KeyRevocationList revoked) {
+		this.revoked = revoked;
 		return this;
 	}
 
@@ -252,6 +262,11 @@ public class KnownHosts extends BaseObject implements IHostKeyVerifier {
 
 	@Override
 	public boolean verify(String host, int port, PublicKey key) throws IOException {
+		us.bringardner.parley.ssh.keys.KeyRevocationList rk = revoked;
+		if( rk != null && rk.isRevoked(SshPublicKeys.encode(key)) ) {
+			logError("HOST KEY OF "+hostName(host, port)+" IS REVOKED ("+SshPublicKeys.fingerprint(key)+")");
+			return false;
+		}
 		Result r = check(host, port, key);
 		switch (r) {
 		case TRUSTED:
@@ -317,6 +332,11 @@ public class KnownHosts extends BaseObject implements IHostKeyVerifier {
 	@Override
 	public boolean verifyCertificate(String host, int port, SshCertificate cert) throws IOException {
 		String name = hostName(host, port);
+		us.bringardner.parley.ssh.keys.KeyRevocationList rk = revoked;
+		if( rk != null && rk.isRevoked(cert) ) {
+			logError("Host certificate of "+name+" ("+cert+") is revoked");
+			return false;
+		}
 		byte[] ca = cert.getCaKeyBlob();
 		byte[] key = cert.getPublicKeyBlob();
 		boolean trusted = false;

@@ -48,7 +48,8 @@ import us.bringardner.parley.core.BaseObject;
  * with {@link SshServer#setCommandFactory(ICommandFactory)}.
  * <p>
  * Of the client's environment variables only LANG and LC_* are passed on (like OpenSSH's
- * default AcceptEnv), and TERM with a pseudo terminal.
+ * default AcceptEnv), TERM with a pseudo terminal, and SSH_AUTH_SOCK when the client
+ * forwarded its agent.
  * <p>
  * <b>Pseudo terminals</b>: when the client asks for one (ssh -t) and pty4j is on the class
  * path (an optional dependency), the command runs on a real pseudo terminal, so interactive
@@ -107,6 +108,7 @@ public class ProcessCommandFactory extends BaseObject implements ICommandFactory
 				Process p;
 				if( pty ) {
 					Map<String, String> penv = new HashMap<String, String>(System.getenv());
+					withoutServerAgent(penv);
 					penv.putAll(clientEnvironment(env));
 					penv.put("TERM", env.getTerm() == null || env.getTerm().isEmpty() ? "xterm" : env.getTerm());
 					p = PtyProcesses.start(commandLine, penv, directory, env.getColumns(), env.getRows());
@@ -116,6 +118,7 @@ public class ProcessCommandFactory extends BaseObject implements ICommandFactory
 					if( directory != null ) {
 						pb.directory(directory);
 					}
+					withoutServerAgent(pb.environment());
 					pb.environment().putAll(clientEnvironment(env));
 					p = pb.start();
 				}
@@ -170,10 +173,23 @@ public class ProcessCommandFactory extends BaseObject implements ICommandFactory
 	}
 
 	/**
+	 * The server's own agent is not for the users' commands: only an agent the client
+	 * forwarded for this session is.
+	 */
+	private static void withoutServerAgent(Map<String, String> env) {
+		env.remove("SSH_AUTH_SOCK");
+		env.remove("SSH_AGENT_PID");
+	}
+
+	/**
 	 * @return LANG and LC_* from the client (like OpenSSH's default AcceptEnv)
 	 */
 	private static Map<String, String> clientEnvironment(CommandEnvironment env) {
 		Map<String, String> ret = new HashMap<String, String>();
+		// The forwarded agent (ssh -A), as OpenSSH's sshd sets it
+		if( env.getAgentSocket() != null ) {
+			ret.put("SSH_AUTH_SOCK", env.getAgentSocket());
+		}
 		for (Map.Entry<String, String> e : env.getEnv().entrySet()) {
 			if( e.getKey().equals("LANG") || e.getKey().startsWith("LC_") ) {
 				ret.put(e.getKey(), e.getValue());

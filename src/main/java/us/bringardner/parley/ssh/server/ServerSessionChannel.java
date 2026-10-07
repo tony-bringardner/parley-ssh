@@ -28,7 +28,6 @@ package us.bringardner.parley.ssh.server;
 import java.io.IOException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import us.bringardner.parley.ssh.algorithms.SshCertificate;
 import us.bringardner.parley.ssh.SshBuffer;
 import us.bringardner.parley.ssh.connection.SshChannel;
 
@@ -64,8 +63,8 @@ public class ServerSessionChannel extends SshChannel {
 		SshServer server = session.getServer();
 		switch (request) {
 		case "pty-req": {
-			if( !session.isPermittedByCertificate(SshCertificate.PERMIT_PTY) ) {
-				session.logInfo("Refused a pty for "+session.getUser()+": the certificate has no permit-pty");
+			if( !session.getKeyRestrictions().isPtyAllowed() ) {
+				session.logInfo("Refused a pty for "+session.getUser()+": not allowed for the key (no-pty, or no permit-pty)");
 				return false;
 			}
 			String term = data.getStringUtf8();
@@ -74,6 +73,14 @@ public class ServerSessionChannel extends SshChannel {
 			data.getInt();
 			data.getInt();
 			env.setPty(term, cols, rows, data.getString());
+			return true;
+		}
+		case us.bringardner.parley.ssh.connection.AgentChannel.REQUEST: {
+			if( !server.isAgentForwardingAllowed() || !session.getKeyRestrictions().isAgentForwardingAllowed() ) {
+				session.logInfo("Refused agent forwarding for "+session.getUser());
+				return false;
+			}
+			env.setAgentSocket(session.getAgentForwarding().enable());
 			return true;
 		}
 		case "env":
@@ -117,15 +124,14 @@ public class ServerSessionChannel extends SshChannel {
 	}
 
 	/**
-	 * @return the certificate's force-command, or null
+	 * @return the key's forced command (authorized_keys command=, a certificate's force-command), or null
 	 */
 	private String forcedCommand() {
-		SshCertificate c = session.getLoginCertificate();
-		return c == null ? null : c.getCriticalOptions().get(SshCertificate.FORCE_COMMAND);
+		return session.getKeyRestrictions().getForceCommand();
 	}
 
 	/**
-	 * A certificate's force-command runs instead of whatever was asked for (as in OpenSSH, the
+	 * A key's forced command runs instead of whatever was asked for (as in OpenSSH, the
 	 * command asked for is in SSH_ORIGINAL_COMMAND).
 	 */
 	private boolean forced(String original) throws IOException {
@@ -134,7 +140,7 @@ public class ServerSessionChannel extends SshChannel {
 			env.setEnv("SSH_ORIGINAL_COMMAND", original);
 		}
 		ICommandFactory f = session.getServer().getCommandFactory();
-		session.logInfo("Running the certificate's force-command for "+session.getUser()+": "+cmd);
+		session.logInfo("Running the key's forced command for "+session.getUser()+": "+cmd);
 		return prepare(f == null ? null : f.create(cmd, env), "exec");
 	}
 

@@ -31,11 +31,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.RandomAccessFile;
-import java.lang.reflect.Method;
-import java.net.ProtocolFamily;
-import java.net.SocketAddress;
-import java.net.StandardProtocolFamily;
-import java.nio.channels.Channels;
 import java.nio.channels.SocketChannel;
 import java.security.PublicKey;
 import java.util.ArrayList;
@@ -44,6 +39,7 @@ import java.util.List;
 import java.util.Locale;
 
 import us.bringardner.parley.ssh.SshBuffer;
+import us.bringardner.parley.ssh.connection.UnixSockets;
 import us.bringardner.parley.ssh.SshException;
 import us.bringardner.parley.ssh.algorithms.SshCertificate;
 import us.bringardner.parley.ssh.algorithms.SshPublicKeys;
@@ -55,7 +51,7 @@ import us.bringardner.parley.ssh.algorithms.SshPublicKeys;
  * <p>
  * On Unix the agent is the socket named by SSH_AUTH_SOCK, which needs Java 16 or later
  * (Unix domain sockets); see {@link #isSupported()}. On Windows it is the named pipe
- * \\.\pipe\openssh-ssh-agent.
+ * \\.\pipe\openssh-ssh-agent, or PuTTY's Pageant ({@link #connectPageant()}).
  * <p>
  * One request at a time (requests are synchronized).
  *
@@ -134,7 +130,7 @@ public class SshAgent implements Closeable {
 	 * @return true if this JVM can reach an agent: Java 16+ on Unix (Unix domain sockets), any on Windows
 	 */
 	public static boolean isSupported() {
-		return isWindows() || unixFamily() != null;
+		return isWindows() || UnixSockets.isSupported();
 	}
 
 	/**
@@ -144,24 +140,99 @@ public class SshAgent implements Closeable {
 	public static boolean isAvailable() {
 		if( isWindows() ) {
 			String sock = System.getenv("SSH_AUTH_SOCK");
-			return (sock != null && !sock.isEmpty()) || new File(WINDOWS_PIPE).exists();
+			return (sock != null && !sock.isEmpty()) || new File(WINDOWS_PIPE).exists() || findPageantPipe() != null;
 		}
 		String sock = System.getenv("SSH_AUTH_SOCK");
 		return sock != null && !sock.isEmpty() && isSupported();
 	}
 
 	/**
-	 * Connect to the user's agent: SSH_AUTH_SOCK, or on Windows the OpenSSH agent's pipe.
+	 * Connect to the user's agent: SSH_AUTH_SOCK, or on Windows the OpenSSH agent's pipe,
+	 * else Pageant's ({@link #connectPageant()}).
 	 */
 	public static SshAgent connect() throws IOException {
 		String sock = System.getenv("SSH_AUTH_SOCK");
 		if( sock == null || sock.isEmpty() ) {
 			if( isWindows() ) {
-				return connect(WINDOWS_PIPE);
+				if( new File(WINDOWS_PIPE).exists() || findPageantPipe() == null ) {
+					return connect(WINDOWS_PIPE);
+				}
+				return connectPageant();
 			}
 			throw new SshException("No SSH agent: SSH_AUTH_SOCK is not set");
 		}
 		return connect(sock);
+	}
+
+	/**
+	 * Connect to PuTTY's Pageant (0.75 and later) through its named pipe,
+	 * \\.\pipe\pageant.USER.HASH, which speaks the same agent protocol. Windows only.
+	 *
+	 * @throws SshException if Pageant isn't running
+	 */
+	public static SshAgent connectPageant() throws IOException {
+		String pipe = findPageantPipe();
+		if( pipe == null ) {
+			throw new SshException("Pageant is not running (no \\\\.\\pipe\\pageant."+System.getProperty("user.name")+".* pipe)");
+		}
+		return connect(pipe);
+	}
+
+	/**
+	 * @return Pageant's pipe for this user, or null
+	 */
+	static String findPageantPipe() {
+		if( !isWindows() ) {
+			return null;
+		}
+		List<String> names = new ArrayList<String>();
+		try (java.nio.file.DirectoryStream<java.nio.file.Path> pipes = java.nio.file.Files.newDirectoryStream(java.nio.file.Paths.get("\\\\.\\pipe\\"))) {
+			for (java.nio.file.Path p : pipes) {
+				names.add(p.getFileName() == null ? p.toString() : p.getFileName().toString());
+			}
+		} catch (IOException | RuntimeException e) {
+			return null;
+		}
+		return pageantPipe(names, System.getProperty("user.name"));
+	}
+
+	/**
+	 * @param names the names of the named pipes
+	 * @return Pageant's pipe for the user, or null
+	 */
+	static String pageantPipe(Iterable<String> names, String user) {
+		String prefix = "pageant."+user.toLowerCase(Locale.ROOT)+".";
+		for (String n : names) {
+			String name = n.replace('/', '\\');
+			name = name.substring(name.lastIndexOf('\\')+1);
+			if( name.toLowerCase(Locale.ROOT).startsWith(prefix) && name.length() > prefix.length() ) {
+				return "\\\\.\\pipe\\"+name;
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * The agent named by an OpenSSH config file, as Pageant --openssh-config writes it
+	 * ("IdentityAgent \"\\.\pipe\pageant...\"").
+	 *
+	 * @return the IdentityAgent's path, or null if the file names none
+	 */
+	public static String identityAgent(File openSshConfig) throws IOException {
+		for (String line : java.nio.file.Files.readAllLines(openSshConfig.toPath(), java.nio.charset.StandardCharsets.UTF_8)) {
+			String l = line.trim();
+			if( l.regionMatches(true, 0, "IdentityAgent", 0, 13) && l.length() > 13 && (Character.isWhitespace(l.charAt(13)) || l.charAt(13) == '=') ) {
+				String v = l.substring(14).trim();
+				if( v.startsWith("=") ) {
+					v = v.substring(1).trim();
+				}
+				if( v.length() >= 2 && v.startsWith("\"") && v.endsWith("\"") ) {
+					v = v.substring(1, v.length()-1);
+				}
+				return v.isEmpty() || v.equalsIgnoreCase("none") ? null : v;
+			}
+		}
+		return null;
 	}
 
 	/**
@@ -170,43 +241,66 @@ public class SshAgent implements Closeable {
 	public static SshAgent connect(String path) throws IOException {
 		if( path.startsWith("\\\\.\\pipe\\") ) {
 			RandomAccessFile pipe = new RandomAccessFile(path, "rw");
-			return new SshAgent(pipe, Channels.newInputStream(pipe.getChannel()), Channels.newOutputStream(pipe.getChannel()));
+			// The file's own read and write: its channel would hold a lock across a blocked read
+			InputStream pin = new InputStream() {
+				@Override
+				public int read() throws IOException {
+					return pipe.read();
+				}
+
+				@Override
+				public int read(byte[] b, int off, int len) throws IOException {
+					return pipe.read(b, off, len);
+				}
+			};
+			OutputStream pout = new OutputStream() {
+				@Override
+				public void write(int b) throws IOException {
+					pipe.write(b);
+				}
+
+				@Override
+				public void write(byte[] b, int off, int len) throws IOException {
+					pipe.write(b, off, len);
+				}
+			};
+			return new SshAgent(pipe, pin, pout);
 		}
-		ProtocolFamily unix = unixFamily();
-		if( unix == null ) {
+		if( !UnixSockets.isSupported() ) {
 			throw new SshException("Connecting to an SSH agent needs Java 16 or later (Unix domain sockets)");
 		}
+		SocketChannel ch;
 		try {
-			Method open = SocketChannel.class.getMethod("open", ProtocolFamily.class);
-			SocketChannel ch = (SocketChannel) open.invoke(null, unix);
-			Method of = Class.forName("java.net.UnixDomainSocketAddress").getMethod("of", String.class);
-			try {
-				ch.connect((SocketAddress) of.invoke(null, path));
-			} catch (IOException e) {
-				ch.close();
-				throw new SshException("Can't connect to the SSH agent at "+path+": "+e.getMessage());
-			}
-			return new SshAgent(ch, Channels.newInputStream(ch), Channels.newOutputStream(ch));
-		} catch (ReflectiveOperationException e) {
-			Throwable t = e.getCause() != null ? e.getCause() : e;
-			if( t instanceof IOException ) {
-				throw (IOException) t;
-			}
-			throw new SshException("Can't connect to the SSH agent: "+t);
+			ch = UnixSockets.connect(path);
+		} catch (IOException e) {
+			throw new SshException("Can't connect to the SSH agent at "+path+": "+e.getMessage());
 		}
+		return new SshAgent(ch, UnixSockets.inputStream(ch), UnixSockets.outputStream(ch));
+	}
+
+	/**
+	 * An agent reached through other streams, e.g. an agent forwarded to a server
+	 * (ServerSession.openForwardedAgent).
+	 */
+	public static SshAgent over(InputStream in, OutputStream out, Closeable closeable) {
+		return new SshAgent(closeable, in, out);
+	}
+
+	/** The raw agent protocol streams, for forwarding the agent */
+	InputStream rawInput() {
+		return in;
+	}
+
+	OutputStream rawOutput() {
+		return out;
+	}
+
+	Closeable rawCloseable() {
+		return channel;
 	}
 
 	private static boolean isWindows() {
 		return System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win");
-	}
-
-	private static ProtocolFamily unixFamily() {
-		try {
-			SocketChannel.class.getMethod("open", ProtocolFamily.class);
-			return StandardProtocolFamily.valueOf("UNIX");
-		} catch (NoSuchMethodException | IllegalArgumentException e) {
-			return null;
-		}
 	}
 
 	/**

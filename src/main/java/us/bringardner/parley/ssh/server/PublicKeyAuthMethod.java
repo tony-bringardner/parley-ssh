@@ -49,6 +49,8 @@ public class PublicKeyAuthMethod implements IServerAuthMethod {
 
 	/** The auth context attribute that holds the certificate the user logged in with */
 	public static final String CERTIFICATE = PublicKeyAuthMethod.class.getName()+".certificate";
+	/** The auth context attribute that holds the logged in key's {@link KeyRestrictions} */
+	public static final String RESTRICTIONS = PublicKeyAuthMethod.class.getName()+".restrictions";
 
 	private final IPublicKeyAuthenticator authenticator;
 
@@ -82,7 +84,25 @@ public class PublicKeyAuthMethod implements IServerAuthMethod {
 		} catch (SshException e) {
 			return Result.FAILURE;
 		}
+		us.bringardner.parley.ssh.keys.KeyRevocationList revoked = context.getServer().getRevokedKeys();
+		if( revoked != null && (cert != null ? revoked.isRevoked(cert) : revoked.isRevoked(blob)) ) {
+			context.getServer().logInfo("Revoked "+(cert != null ? "certificate "+cert : "key "+SshPublicKeys.fingerprint(blob))+" refused for "+user);
+			return Result.FAILURE;
+		}
+		// The authenticator may say what the key may do (authorized_keys options)
+		context.getAttributes().remove(KeyRestrictions.ATTRIBUTE);
 		IPrincipal p = cert != null ? authenticator.authenticate(user, cert, context) : authenticator.authenticate(user, key, context);
+		KeyRestrictions r = (KeyRestrictions) context.getAttributes().remove(KeyRestrictions.ATTRIBUTE);
+		if( r == null ) {
+			r = KeyRestrictions.NONE;
+		}
+		if( cert != null ) {
+			r = r.and(KeyRestrictions.of(cert));
+			if( r == null ) {
+				// The certificate and the authorized_keys line force different commands
+				return Result.FAILURE;
+			}
+		}
 		if( p == null ) {
 			return Result.FAILURE;
 		}
@@ -104,9 +124,10 @@ public class PublicKeyAuthMethod implements IServerAuthMethod {
 			return Result.FAILURE;
 		}
 		if( cert != null ) {
-			// The session applies its restrictions (see ServerSession.getLoginCertificate)
 			context.getAttributes().put(CERTIFICATE, cert);
 		}
+		// The session applies them (see ServerSession.getKeyRestrictions)
+		context.getAttributes().put(RESTRICTIONS, r);
 		return Result.success(p);
 	}
 }

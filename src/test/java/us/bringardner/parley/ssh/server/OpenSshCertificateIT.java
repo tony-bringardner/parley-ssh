@@ -134,6 +134,23 @@ public class OpenSshCertificateIT {
 		assertNotEquals(0, p.exitValue());
 	}
 
+	/** A cert-authority line in authorized_keys, with OpenSSH's ssh */
+	@Test
+	public void certAuthorityLineWithOpensshClient() throws Exception {
+		File keys = f("authorized_keys_ca");
+		Files.write(keys.toPath(), ("cert-authority,principals=\"alice\",command=\"echo via-line\" "
+				+new String(Files.readAllBytes(f("ca.pub").toPath()), StandardCharsets.UTF_8)).getBytes(StandardCharsets.UTF_8));
+		IPublicKeyAuthenticator old = server.getPublicKeyAuthenticator();
+		server.setPublicKeyAuthenticator(AuthorizedKeysAuthenticator.forFile(keys));
+		try {
+			String[] r = ssh("user_ed25519", "whoami");
+			assertEquals("0", r[0], r[1]);
+			assertEquals("via-line\n", r[1], "the line's command ran");
+		} finally {
+			server.setPublicKeyAuthenticator(old);
+		}
+	}
+
 	/** A private sshd with the host certificate, trusting the CA for users */
 	private static void startSshd() throws Exception {
 		if( sshd != null ) {

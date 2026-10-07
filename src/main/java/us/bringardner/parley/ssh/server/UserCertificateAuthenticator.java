@@ -139,7 +139,16 @@ public class UserCertificateAuthenticator extends BaseObject implements IPublicK
 		if( !trusted ) {
 			return "its CA is not trusted";
 		}
-		Collection<String> names = principals.apply(user);
+		return check(cert, principals.apply(user), from);
+	}
+
+	/**
+	 * The checks of a user certificate whose CA is trusted: valid now, for one of these
+	 * principals, no unknown critical option, from an address its source-address allows.
+	 *
+	 * @return null if it passes, else why not
+	 */
+	static String check(SshCertificate cert, Collection<String> names, SocketAddress from) {
 		if( names == null || names.isEmpty() ) {
 			return "the user has no principals";
 		}

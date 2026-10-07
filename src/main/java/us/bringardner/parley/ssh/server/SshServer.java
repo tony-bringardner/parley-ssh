@@ -87,6 +87,8 @@ public class SshServer extends NioServer {
 	public static final String PROPERTY_HOST_KEY_DIR = "HostKeyDir";
 	/** Class name of the {@link IShellFactory} to use (public no-argument constructor), e.g. a factory from fsh, the FileSource Shell */
 	public static final String PROPERTY_SHELL_FACTORY = "ShellFactory";
+	/** A KRL or list of public keys (OpenSSH's RevokedKeys): those keys and certificates can't log in */
+	public static final String PROPERTY_REVOKED_KEYS = "RevokedKeys";
 	/** Like OpenSSH's MaxAuthTries: clients try each of their keys, and each refused key counts */
 	public static final int DEFAULT_MAX_AUTH_TRIES = 6;
 	/** Like OpenSSH's LoginGraceTime */
@@ -107,11 +109,13 @@ public class SshServer extends NioServer {
 	private volatile IPublicKeyAuthenticator publicKeyAuthenticator;
 	private volatile ICommandFactory commandFactory;
 	private volatile IShellFactory shellFactory;
+	private volatile us.bringardner.parley.ssh.keys.KeyRevocationList revokedKeys;
 	private volatile boolean shellFactoryConfigured;
 	private final Map<String, ISubsystemFactory> subsystems = new ConcurrentHashMap<String, ISubsystemFactory>();
 	private volatile String banner;
 	private volatile int maxChannelsPerSession = 10;
 	private volatile IForwardingFilter forwardingFilter;
+	private volatile boolean agentForwarding = true;
 
 	public SshServer() {
 		this(22);
@@ -197,6 +201,10 @@ public class SshServer extends NioServer {
 		}
 		hostKeys = Collections.unmodifiableList(new ArrayList<KeyPair>(keys));
 		hostCertificates = Collections.unmodifiableList(certs);
+		String revoked = getProperty(PROPERTY_REVOKED_KEYS);
+		if( revokedKeys == null && revoked != null && !revoked.trim().isEmpty() ) {
+			revokedKeys = us.bringardner.parley.ssh.keys.KeyRevocationList.load(new File(revoked.trim()));
+		}
 	}
 
 	// ------------------------------------------------------------------ authentication
@@ -371,6 +379,18 @@ public class SshServer extends NioServer {
 		return hostKeys;
 	}
 
+	public us.bringardner.parley.ssh.keys.KeyRevocationList getRevokedKeys() {
+		return revokedKeys;
+	}
+
+	/**
+	 * @param revoked keys and certificates that can't log in (OpenSSH's RevokedKeys), or null;
+	 * also set with the {@value #PROPERTY_REVOKED_KEYS} property
+	 */
+	public void setRevokedKeys(us.bringardner.parley.ssh.keys.KeyRevocationList revoked) {
+		this.revokedKeys = revoked;
+	}
+
 	/**
 	 * @return the host certificates in use (empty until the server starts)
 	 */
@@ -405,6 +425,19 @@ public class SshServer extends NioServer {
 	@Override
 	protected int getDefaultLoginTimeLimit() {
 		return DEFAULT_LOGIN_GRACE_TIME;
+	}
+
+	public boolean isAgentForwardingAllowed() {
+		return agentForwarding;
+	}
+
+	/**
+	 * @param allowed true (default, as OpenSSH's AllowAgentForwarding) to let clients forward
+	 * their agent (ssh -A); a key with no-agent-forwarding, or a certificate without
+	 * permit-agent-forwarding, still can't
+	 */
+	public void setAgentForwardingAllowed(boolean allowed) {
+		this.agentForwarding = allowed;
 	}
 
 	public IForwardingFilter getForwardingFilter() {

@@ -48,6 +48,7 @@ public class CommandEnvironment {
 	private final ServerSession session;
 	private final Map<String, String> env = new LinkedHashMap<String, String>();
 	private volatile String term;
+	private volatile String agentSocket;
 	private volatile int columns;
 	private volatile int rows;
 	private volatile byte[] terminalModes;
@@ -93,6 +94,17 @@ public class CommandEnvironment {
 	/**
 	 * @return true if the client asked for a pseudo terminal
 	 */
+	/**
+	 * @return the forwarded agent's socket (what SSH_AUTH_SOCK names), or null
+	 */
+	public String getAgentSocket() {
+		return agentSocket;
+	}
+
+	void setAgentSocket(String path) {
+		this.agentSocket = path;
+	}
+
 	public boolean hasPty() {
 		return term != null;
 	}

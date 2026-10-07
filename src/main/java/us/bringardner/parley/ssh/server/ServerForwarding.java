@@ -37,7 +37,6 @@ import java.util.concurrent.ConcurrentHashMap;
 
 import us.bringardner.parley.core.BaseObject;
 import us.bringardner.parley.io.IoUtils;
-import us.bringardner.parley.ssh.algorithms.SshCertificate;
 import us.bringardner.parley.ssh.SshBuffer;
 import us.bringardner.parley.ssh.connection.ConnectionService;
 import us.bringardner.parley.ssh.connection.ForwardingChannel;
@@ -67,7 +66,7 @@ class ServerForwarding extends BaseObject {
 
 	private IForwardingFilter filter() {
 		IForwardingFilter f = session.getServer().getForwardingFilter();
-		return f != null && session.isPermitted("forward") && session.isPermittedByCertificate(SshCertificate.PERMIT_PORT_FORWARDING) ? f : null;
+		return f != null && session.isPermitted("forward") && session.getKeyRestrictions().isPortForwardingAllowed() ? f : null;
 	}
 
 	private ForwardingChannel direct(SshBuffer data) throws IOException {
@@ -76,7 +75,7 @@ class ServerForwarding extends BaseObject {
 		String originHost = data.getStringUtf8();
 		int originPort = data.getInt();
 		IForwardingFilter f = filter();
-		if( f == null || port < 1 || port > 65535 || !f.canConnect(session, host, port) ) {
+		if( f == null || port < 1 || port > 65535 || !session.getKeyRestrictions().canConnect(host, port) || !f.canConnect(session, host, port) ) {
 			logInfo("Refused forwarding to "+host+":"+port+" for "+session.getUser());
 			return null;
 		}
@@ -101,7 +100,7 @@ class ServerForwarding extends BaseObject {
 		String bindHost = data.getStringUtf8();
 		int port = data.getInt();
 		IForwardingFilter f = filter();
-		if( f == null || port < 0 || port > 65535 || !f.canListen(session, bindHost, port) ) {
+		if( f == null || port < 0 || port > 65535 || !session.getKeyRestrictions().canListen(bindHost, port) || !f.canListen(session, bindHost, port) ) {
 			logInfo("Refused listening on "+bindHost+":"+port+" for "+session.getUser());
 			return null;
 		}

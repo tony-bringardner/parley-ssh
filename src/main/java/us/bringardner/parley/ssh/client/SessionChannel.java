@@ -94,6 +94,20 @@ public class SessionChannel extends SshChannel {
 	}
 
 	/**
+	 * Ask the server to forward the SSH agent to this session (ssh -A), before shell or exec:
+	 * programs on the server can then use the client's agent (SSH_AUTH_SOCK). The session must
+	 * allow it first ({@link ClientSession#setAgentForwarding(String)}).
+	 * <p>
+	 * Only forward the agent to servers you trust: whoever controls the server can use the
+	 * agent's keys while the session lasts (not copy them).
+	 *
+	 * @return true if the server agreed
+	 */
+	public boolean requestAgentForwarding() throws IOException {
+		return ask(us.bringardner.parley.ssh.connection.AgentChannel.REQUEST, null);
+	}
+
+	/**
 	 * Run a command.
 	 * @throws SshException if the server refuses
 	 */
