@@ -33,17 +33,22 @@ import us.bringardner.parley.ssh.SshBuffer;
 import us.bringardner.parley.ssh.SshConstants;
 import us.bringardner.parley.ssh.SshException;
 import us.bringardner.parley.ssh.algorithms.ISignatureAlgorithm;
+import us.bringardner.parley.ssh.algorithms.SshCertificate;
 import us.bringardner.parley.ssh.algorithms.SshPublicKeys;
 
 /**
  * "publickey" (RFC 4252 7): a query (no signature) is answered with PK_OK if the key may
  * log in; a signed request is checked against the session id and the request, then the
  * authenticator decides whose key it is. Only the server's signature algorithms are
- * accepted (SHA-1 ssh-rsa only if turned on).
+ * accepted (SHA-1 ssh-rsa only if turned on). A key with an OpenSSH certificate goes to the
+ * authenticator's certificate method.
  *
  * @author Tony Bringardner
  */
 public class PublicKeyAuthMethod implements IServerAuthMethod {
+
+	/** The auth context attribute that holds the certificate the user logged in with */
+	public static final String CERTIFICATE = PublicKeyAuthMethod.class.getName()+".certificate";
 
 	private final IPublicKeyAuthenticator authenticator;
 
@@ -66,12 +71,18 @@ public class PublicKeyAuthMethod implements IServerAuthMethod {
 			return Result.FAILURE;
 		}
 		PublicKey key;
+		SshCertificate cert = null;
 		try {
-			key = SshPublicKeys.decode(blob);
+			if( SshCertificate.isCertificateType(sig.getKeyType()) ) {
+				cert = SshCertificate.decode(blob);
+				key = cert.getPublicKey();
+			} else {
+				key = SshPublicKeys.decode(blob);
+			}
 		} catch (SshException e) {
 			return Result.FAILURE;
 		}
-		IPrincipal p = authenticator.authenticate(user, key, context);
+		IPrincipal p = cert != null ? authenticator.authenticate(user, cert, context) : authenticator.authenticate(user, key, context);
 		if( p == null ) {
 			return Result.FAILURE;
 		}
@@ -89,6 +100,13 @@ public class PublicKeyAuthMethod implements IServerAuthMethod {
 		b.putBoolean(true);
 		b.putString(alg);
 		b.putString(blob);
-		return sig.verify(key, b.toByteArray(), signature) ? Result.success(p) : Result.FAILURE;
+		if( !sig.verify(key, b.toByteArray(), signature) ) {
+			return Result.FAILURE;
+		}
+		if( cert != null ) {
+			// The session applies its restrictions (see ServerSession.getLoginCertificate)
+			context.getAttributes().put(CERTIFICATE, cert);
+		}
+		return Result.success(p);
 	}
 }

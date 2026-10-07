@@ -52,8 +52,11 @@ import us.bringardner.parley.ssh.client.ClientSession;
 import us.bringardner.parley.ssh.client.SessionChannel;
 
 /**
- * An SFTP version 3 client (draft-ietf-secsh-filexfer-02, as OpenSSH speaks it) on a
- * "sftp" subsystem channel.
+ * An SFTP client on a "sftp" subsystem channel: version 3 (draft-ietf-secsh-filexfer-02, as
+ * OpenSSH speaks it) by default, or up to version 6 with {@link #open(ClientSession, int)}
+ * (the server answers with the highest version both speak). The API is the same for every
+ * version: open flags, rename and links are sent as each version wants them, and version
+ * 4+ listings, which have no "ls -l" long name, get one made from the attributes.
  * <p>
  * Requests carry ids, so many can be in flight: the client is safe to use from several
  * threads, and its streams keep several reads or writes outstanding instead of waiting a
@@ -99,6 +102,9 @@ public class SftpClient extends BaseObject implements Closeable {
 	private final AtomicInteger ids = new AtomicInteger();
 	private final ReentrantLock sendLock = new ReentrantLock();
 	private final CompletableFuture<Integer> version = new CompletableFuture<Integer>();
+	// The negotiated version, for encoding (3 until VERSION arrives)
+	private volatile int ver = SftpConstants.SFTP_VERSION;
+	private int wantedVersion = SftpConstants.SFTP_VERSION;
 	private volatile Map<String, String> extensions = Collections.emptyMap();
 	private volatile long timeout = 60000;
 	private volatile int chunkSize = DEFAULT_CHUNK;
@@ -159,7 +165,19 @@ public class SftpClient extends BaseObject implements Closeable {
 	 * Open an "sftp" subsystem channel on an authenticated session and say hello (version 3).
 	 */
 	public static SftpClient open(ClientSession session) throws IOException {
+		return open(session, SftpConstants.SFTP_VERSION);
+	}
+
+	/**
+	 * @param maxVersion the highest version to speak, 3 to 6; the server may choose a lower one
+	 * ({@link #getServerVersion()})
+	 */
+	public static SftpClient open(ClientSession session, int maxVersion) throws IOException {
+		if( maxVersion < SftpConstants.SFTP_VERSION || maxVersion > SftpConstants.SFTP_MAX_VERSION ) {
+			throw new IllegalArgumentException("SFTP versions 3 to 6, not "+maxVersion);
+		}
 		SftpClient ret = new SftpClient();
+		ret.wantedVersion = maxVersion;
 		SubsystemChannel ch = ret.new SubsystemChannel();
 		ret.channel = ch;
 		session.openChannel(ch);
@@ -175,11 +193,11 @@ public class SftpClient extends BaseObject implements Closeable {
 
 	private void init() throws IOException {
 		SshBuffer b = new SshBuffer();
-		b.putInt(5).putByte(SftpConstants.SSH_FXP_INIT).putInt(SftpConstants.SFTP_VERSION);
+		b.putInt(5).putByte(SftpConstants.SSH_FXP_INIT).putInt(wantedVersion);
 		writePacket(b);
 		int v = await(version, "SFTP version");
-		if( v < 3 ) {
-			throw new SftpException(SftpConstants.SSH_FX_OP_UNSUPPORTED, "Server speaks SFTP version "+v, null);
+		if( v < 3 || v > wantedVersion ) {
+			throw new SftpException(SftpConstants.SSH_FX_OP_UNSUPPORTED, "Server speaks SFTP version "+v+" (asked for at most "+wantedVersion+")", null);
 		}
 	}
 
@@ -192,6 +210,7 @@ public class SftpClient extends BaseObject implements Closeable {
 				ext.put(packet.getStringUtf8(), packet.getStringUtf8());
 			}
 			extensions = Collections.unmodifiableMap(ext);
+			ver = v;
 			logDebug(() -> "SFTP version "+v+", extensions "+ext.keySet());
 			version.complete(v);
 			return;
@@ -310,45 +329,88 @@ public class SftpClient extends BaseObject implements Closeable {
 		return new SshBuffer().putString(path);
 	}
 
+	/** Version 4+ STAT flags: the attributes wanted */
+	private static final int STAT_ALL = 0x01 | 0x04 | 0x08 | 0x10 | 0x20 | 0x80 | 0x100 | 0x2000;
+
+	/** STAT, LSTAT and FSTAT carry the attributes wanted from version 4 */
+	private SshBuffer statFlags(SshBuffer b) {
+		return ver >= 4 ? b.putInt(ver >= 6 ? STAT_ALL : STAT_ALL & ~0x2000) : b;
+	}
+
+	private SftpAttrs attrs(SshBuffer b) throws IOException {
+		return SftpAttrs.read(b, ver);
+	}
+
 	// ------------------------------------------------------------------ file system operations
 
 	/**
 	 * @return the attributes, following symbolic links
 	 */
 	public SftpAttrs stat(String path) throws IOException {
-		return SftpAttrs.read(expect(call(SftpConstants.SSH_FXP_STAT, path(path), path), SftpConstants.SSH_FXP_ATTRS, path));
+		return attrs(expect(call(SftpConstants.SSH_FXP_STAT, statFlags(path(path)), path), SftpConstants.SSH_FXP_ATTRS, path));
 	}
 
 	/**
 	 * @return the attributes of the path itself (a link is not followed)
 	 */
 	public SftpAttrs lstat(String path) throws IOException {
-		return SftpAttrs.read(expect(call(SftpConstants.SSH_FXP_LSTAT, path(path), path), SftpConstants.SSH_FXP_ATTRS, path));
+		return attrs(expect(call(SftpConstants.SSH_FXP_LSTAT, statFlags(path(path)), path), SftpConstants.SSH_FXP_ATTRS, path));
 	}
 
 	public SftpAttrs fstat(SftpHandle handle) throws IOException {
-		SshBuffer b = new SshBuffer().putString(handle.id());
-		return SftpAttrs.read(expect(call(SftpConstants.SSH_FXP_FSTAT, b, handle.getPath()), SftpConstants.SSH_FXP_ATTRS, handle.getPath()));
+		SshBuffer b = statFlags(new SshBuffer().putString(handle.id()));
+		return attrs(expect(call(SftpConstants.SSH_FXP_FSTAT, b, handle.getPath()), SftpConstants.SSH_FXP_ATTRS, handle.getPath()));
 	}
 
 	/**
 	 * Change attributes; only the fields set in attrs change.
 	 */
 	public void setStat(String path, SftpAttrs attrs) throws IOException {
-		checkStatus(call(SftpConstants.SSH_FXP_SETSTAT, attrs.write(path(path)), path), path);
+		checkStatus(call(SftpConstants.SSH_FXP_SETSTAT, attrs.write(path(path), ver), path), path);
 	}
 
 	public void fsetStat(SftpHandle handle, SftpAttrs attrs) throws IOException {
-		checkStatus(call(SftpConstants.SSH_FXP_FSETSTAT, attrs.write(new SshBuffer().putString(handle.id())), handle.getPath()), handle.getPath());
+		checkStatus(call(SftpConstants.SSH_FXP_FSETSTAT, attrs.write(new SshBuffer().putString(handle.id()), ver), handle.getPath()), handle.getPath());
 	}
 
 	/**
-	 * @param flags SftpConstants.SSH_FXF_...
+	 * @param flags SftpConstants.SSH_FXF_READ, WRITE, APPEND, CREAT, TRUNC, EXCL (version 3's;
+	 * sent as desired access and disposition to version 5+)
 	 * @param attrs for a file that is created (e.g. its permissions), or SftpAttrs.NONE
 	 */
 	public SftpHandle open(String path, int flags, SftpAttrs attrs) throws IOException {
-		SshBuffer b = path(path).putInt(flags);
-		attrs.write(b);
+		SshBuffer b = path(path);
+		if( ver >= 5 ) {
+			int access = 0;
+			int v5 = 0;
+			if( (flags & SftpConstants.SSH_FXF_READ) != 0 ) {
+				access |= SftpConstants.ACE4_READ_DATA | SftpConstants.ACE4_READ_ATTRIBUTES;
+			}
+			if( (flags & SftpConstants.SSH_FXF_WRITE) != 0 ) {
+				access |= SftpConstants.ACE4_WRITE_DATA | SftpConstants.ACE4_WRITE_ATTRIBUTES;
+			}
+			if( (flags & SftpConstants.SSH_FXF_APPEND) != 0 ) {
+				access |= SftpConstants.ACE4_APPEND_DATA;
+				v5 |= SftpConstants.SSH_FXF_APPEND_DATA;
+			}
+			boolean creat = (flags & SftpConstants.SSH_FXF_CREAT) != 0;
+			boolean trunc = (flags & SftpConstants.SSH_FXF_TRUNC) != 0;
+			if( creat && (flags & SftpConstants.SSH_FXF_EXCL) != 0 ) {
+				v5 |= SftpConstants.SSH_FXF_CREATE_NEW;
+			} else if( creat && trunc ) {
+				v5 |= SftpConstants.SSH_FXF_CREATE_TRUNCATE;
+			} else if( creat ) {
+				v5 |= SftpConstants.SSH_FXF_OPEN_OR_CREATE;
+			} else if( trunc ) {
+				v5 |= SftpConstants.SSH_FXF_TRUNCATE_EXISTING;
+			} else {
+				v5 |= SftpConstants.SSH_FXF_OPEN_EXISTING;
+			}
+			b.putInt(access).putInt(v5);
+		} else {
+			b.putInt(flags);
+		}
+		attrs.write(b, ver);
 		byte[] h = expect(call(SftpConstants.SSH_FXP_OPEN, b, path), SftpConstants.SSH_FXP_HANDLE, path).getString();
 		return new SftpHandle(this, h, path);
 	}
@@ -407,7 +469,14 @@ public class SftpClient extends BaseObject implements Closeable {
 				SshBuffer d = expect(r, SftpConstants.SSH_FXP_NAME, dir);
 				int n = d.getInt();
 				for (int i = 0; i < n; i++) {
-					ret.add(new SftpDirEntry(d.getStringUtf8(), d.getStringUtf8(), SftpAttrs.read(d)));
+					String name = d.getStringUtf8();
+					if( ver == 3 ) {
+						ret.add(new SftpDirEntry(name, d.getStringUtf8(), attrs(d)));
+					} else {
+						// Version 4+ has no long name: made from the attributes
+						SftpAttrs a = attrs(d);
+						ret.add(new SftpDirEntry(name, longName(name, a), a));
+					}
 				}
 			}
 		} finally {
@@ -421,7 +490,7 @@ public class SftpClient extends BaseObject implements Closeable {
 	}
 
 	public void mkdir(String path, SftpAttrs attrs) throws IOException {
-		checkStatus(call(SftpConstants.SSH_FXP_MKDIR, attrs.write(path(path)), path), path);
+		checkStatus(call(SftpConstants.SSH_FXP_MKDIR, attrs.write(path(path), ver), path), path);
 	}
 
 	public void mkdir(String path) throws IOException {
@@ -433,25 +502,40 @@ public class SftpClient extends BaseObject implements Closeable {
 	}
 
 	/**
-	 * Rename; version 3 servers fail if 'to' exists (see {@link #posixRename(String, String)}).
+	 * Rename; fails if 'to' exists (see {@link #posixRename(String, String)}).
 	 */
 	public void rename(String from, String to) throws IOException {
-		checkStatus(call(SftpConstants.SSH_FXP_RENAME, path(from).putString(to), from), from);
+		SshBuffer b = path(from).putString(to);
+		if( ver >= 5 ) {
+			b.putInt(0);
+		}
+		checkStatus(call(SftpConstants.SSH_FXP_RENAME, b, from), from);
 	}
 
 	/**
-	 * Rename, replacing 'to' atomically (posix-rename@openssh.com).
+	 * Rename, replacing 'to' atomically: posix-rename@openssh.com, else (version 5+) RENAME
+	 * with the overwrite and atomic flags.
 	 *
-	 * @throws SftpException SSH_FX_OP_UNSUPPORTED if the server doesn't have the extension
+	 * @throws SftpException SSH_FX_OP_UNSUPPORTED if the server can't
 	 */
 	public void posixRename(String from, String to) throws IOException {
+		if( !hasExtension(SftpConstants.EXT_POSIX_RENAME) && ver >= 5 ) {
+			SshBuffer b = path(from).putString(to).putInt(SftpConstants.SSH_FXF_RENAME_OVERWRITE | SftpConstants.SSH_FXF_RENAME_ATOMIC);
+			checkStatus(call(SftpConstants.SSH_FXP_RENAME, b, from), from);
+			return;
+		}
 		extended(SftpConstants.EXT_POSIX_RENAME, path(from).putString(to), from);
 	}
 
 	/**
-	 * Create a hard link 'link' to 'existing' (hardlink@openssh.com).
+	 * Create a hard link 'link' to 'existing': hardlink@openssh.com, else (version 6) LINK.
 	 */
 	public void hardlink(String existing, String link) throws IOException {
+		if( !hasExtension(SftpConstants.EXT_HARDLINK) && ver >= 6 ) {
+			// The existing file first, as OpenSSH and MINA send links (see symlink)
+			checkStatus(call(SftpConstants.SSH_FXP_LINK, path(existing).putString(link).putBoolean(false), link), link);
+			return;
+		}
 		extended(SftpConstants.EXT_HARDLINK, path(existing).putString(link), link);
 	}
 
@@ -474,11 +558,35 @@ public class SftpClient extends BaseObject implements Closeable {
 	}
 
 	/**
-	 * Create the symbolic link 'link' pointing at 'target'. Sent in the order OpenSSH (and
-	 * so most servers) expects, target first: the reverse of the draft.
+	 * Create the symbolic link 'link' pointing at 'target' (SYMLINK, or LINK in version 6).
+	 * Sent in the order OpenSSH and MINA use, target first: the reverse of the drafts.
 	 */
 	public void symlink(String target, String link) throws IOException {
+		if( ver >= 6 ) {
+			checkStatus(call(SftpConstants.SSH_FXP_LINK, path(target).putString(link).putBoolean(true), link), link);
+			return;
+		}
 		checkStatus(call(SftpConstants.SSH_FXP_SYMLINK, path(target).putString(link), link), link);
+	}
+
+	/**
+	 * "ls -l" style, for version 4+ listings
+	 */
+	static String longName(String name, SftpAttrs a) {
+		int m = a.getPermissions();
+		StringBuilder perms = new StringBuilder();
+		perms.append(a.isDirectory() ? 'd' : a.isSymbolicLink() ? 'l' : '-');
+		String rwx = "rwxrwxrwx";
+		for (int i = 0; i < 9; i++) {
+			perms.append((m & (0400 >> i)) != 0 ? rwx.charAt(i) : '-');
+		}
+		String owner = a.hasOwnerNames() ? a.getOwner() : a.hasOwner() ? Integer.toUnsignedString(a.getUid()) : "-";
+		String group = a.hasOwnerNames() ? a.getGroup() : a.hasOwner() ? Integer.toUnsignedString(a.getGid()) : "-";
+		long mtime = a.getModifyTime()*1000;
+		boolean recent = Math.abs(System.currentTimeMillis()-mtime) < 180L*24*60*60*1000;
+		String date = new java.text.SimpleDateFormat(recent ? "MMM dd HH:mm" : "MMM dd  yyyy", java.util.Locale.US).format(new java.util.Date(mtime));
+		return String.format(java.util.Locale.US, "%s %3d %-8s %-8s %8d %s %s", perms, a.hasLinkCount() ? a.getLinkCount() : 1,
+				owner, group, a.getSize(), date, name);
 	}
 
 	private static String firstName(Reply r, String path) throws IOException {

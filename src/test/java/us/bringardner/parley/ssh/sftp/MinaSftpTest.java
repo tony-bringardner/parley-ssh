@@ -108,6 +108,16 @@ public class MinaSftpTest {
 		}
 	}
 
+	/** Our client with MINA's server (which speaks 3 to 6) at each version */
+	@Test
+	public void eachVersion() throws Exception {
+		for (int v = 3; v <= 6; v++) {
+			try (SftpClient s = SftpClient.open(session, v)) {
+				SftpVersionCheck.roundTrip(s, "/v"+v, v, false);
+			}
+		}
+	}
+
 	@Test
 	public void versionAndPaths() throws Exception {
 		assertEquals(3, sftp.getServerVersion());

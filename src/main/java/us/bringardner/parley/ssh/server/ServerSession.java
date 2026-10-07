@@ -30,6 +30,7 @@ import java.net.SocketAddress;
 import java.security.GeneralSecurityException;
 import java.security.KeyPair;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -43,6 +44,7 @@ import us.bringardner.parley.ssh.SshBuffer;
 import us.bringardner.parley.ssh.SshConstants;
 import us.bringardner.parley.ssh.SshException;
 import us.bringardner.parley.ssh.algorithms.ISignatureAlgorithm;
+import us.bringardner.parley.ssh.algorithms.SshCertificate;
 import us.bringardner.parley.ssh.algorithms.SshPublicKeys;
 import us.bringardner.parley.ssh.connection.ConnectionService;
 import us.bringardner.parley.ssh.transport.SshTransport;
@@ -146,6 +148,22 @@ public class ServerSession extends SshTransport {
 
 	/**
 	 * @param permission e.g. "shell", "exec", "sftp"
+	 * @return the OpenSSH certificate the user logged in with, or null
+	 */
+	public SshCertificate getLoginCertificate() {
+		return authenticated ? (SshCertificate) attributes.get(PublicKeyAuthMethod.CERTIFICATE) : null;
+	}
+
+	/**
+	 * @param extension e.g. {@link SshCertificate#PERMIT_PTY}
+	 * @return true unless the user logged in with a certificate that doesn't have it
+	 */
+	public boolean isPermittedByCertificate(String extension) {
+		SshCertificate c = getLoginCertificate();
+		return c == null || c.hasExtension(extension);
+	}
+
+	/**
 	 * @return true if the user may: always without an access control list, else only with the permission
 	 */
 	public boolean isPermitted(String permission) {
@@ -187,6 +205,10 @@ public class ServerSession extends SshTransport {
 		if( sig == null ) {
 			return null;
 		}
+		if( SshCertificate.isCertificateType(sig.getKeyType()) ) {
+			SshCertificate c = hostCertificate(sig.getKeyType());
+			return c == null ? null : keyOf(c);
+		}
 		for (KeyPair kp : server.getHostKeys()) {
 			if( sig.getKeyType().equals(SshPublicKeys.keyType(kp.getPublic())) ) {
 				return kp;
@@ -195,13 +217,35 @@ public class ServerSession extends SshTransport {
 		return null;
 	}
 
+	private SshCertificate hostCertificate(String type) {
+		for (SshCertificate c : server.getHostCertificates()) {
+			if( c.getType().equals(type) ) {
+				return c;
+			}
+		}
+		return null;
+	}
+
+	private KeyPair keyOf(SshCertificate c) {
+		for (KeyPair kp : server.getHostKeys()) {
+			if( Arrays.equals(SshPublicKeys.encode(kp.getPublic()), c.getPublicKeyBlob()) ) {
+				return kp;
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * K_S: the key's blob, or for a certificate algorithm the certificate's
+	 */
 	@Override
 	protected byte[] getHostKey(String algorithm) throws IOException {
 		KeyPair kp = hostKey(algorithm);
 		if( kp == null ) {
 			throw new SshException(SshConstants.SSH_DISCONNECT_KEY_EXCHANGE_FAILED, "No host key for "+algorithm);
 		}
-		return SshPublicKeys.encode(kp.getPublic());
+		String type = getAlgorithms().findHostKeyAlgorithm(algorithm).getKeyType();
+		return SshCertificate.isCertificateType(type) ? hostCertificate(type).getBlob() : SshPublicKeys.encode(kp.getPublic());
 	}
 
 	@Override

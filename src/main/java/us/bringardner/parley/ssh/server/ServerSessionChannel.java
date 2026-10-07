@@ -28,6 +28,7 @@ package us.bringardner.parley.ssh.server;
 import java.io.IOException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import us.bringardner.parley.ssh.algorithms.SshCertificate;
 import us.bringardner.parley.ssh.SshBuffer;
 import us.bringardner.parley.ssh.connection.SshChannel;
 
@@ -63,6 +64,10 @@ public class ServerSessionChannel extends SshChannel {
 		SshServer server = session.getServer();
 		switch (request) {
 		case "pty-req": {
+			if( !session.isPermittedByCertificate(SshCertificate.PERMIT_PTY) ) {
+				session.logInfo("Refused a pty for "+session.getUser()+": the certificate has no permit-pty");
+				return false;
+			}
 			String term = data.getStringUtf8();
 			int cols = data.getInt();
 			int rows = data.getInt();
@@ -76,15 +81,24 @@ public class ServerSessionChannel extends SshChannel {
 			return true;
 		case "exec": {
 			String cmd = data.getStringUtf8();
+			if( forcedCommand() != null ) {
+				return forced(cmd);
+			}
 			ICommandFactory f = server.getCommandFactory();
 			return prepare(f == null ? null : f.create(cmd, env), "exec");
 		}
 		case "shell": {
+			if( forcedCommand() != null ) {
+				return forced(null);
+			}
 			IShellFactory f = server.getShellFactory();
 			return prepare(f == null ? null : f.create(env), "shell");
 		}
 		case "subsystem": {
 			String name = data.getStringUtf8();
+			if( forcedCommand() != null ) {
+				return forced(null);
+			}
 			ISubsystemFactory f = server.getSubsystem(name);
 			return prepare(f == null ? null : f.create(env), name);
 		}
@@ -100,6 +114,28 @@ public class ServerSessionChannel extends SshChannel {
 		default:
 			return false;
 		}
+	}
+
+	/**
+	 * @return the certificate's force-command, or null
+	 */
+	private String forcedCommand() {
+		SshCertificate c = session.getLoginCertificate();
+		return c == null ? null : c.getCriticalOptions().get(SshCertificate.FORCE_COMMAND);
+	}
+
+	/**
+	 * A certificate's force-command runs instead of whatever was asked for (as in OpenSSH, the
+	 * command asked for is in SSH_ORIGINAL_COMMAND).
+	 */
+	private boolean forced(String original) throws IOException {
+		String cmd = forcedCommand();
+		if( original != null ) {
+			env.setEnv("SSH_ORIGINAL_COMMAND", original);
+		}
+		ICommandFactory f = session.getServer().getCommandFactory();
+		session.logInfo("Running the certificate's force-command for "+session.getUser()+": "+cmd);
+		return prepare(f == null ? null : f.create(cmd, env), "exec");
 	}
 
 	/**

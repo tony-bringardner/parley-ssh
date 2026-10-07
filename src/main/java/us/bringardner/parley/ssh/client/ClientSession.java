@@ -45,6 +45,7 @@ import us.bringardner.parley.ssh.SshConstants;
 import us.bringardner.parley.ssh.SshException;
 import us.bringardner.parley.ssh.algorithms.ISignatureAlgorithm;
 import us.bringardner.parley.ssh.algorithms.SshAlgorithms;
+import us.bringardner.parley.ssh.algorithms.SshCertificate;
 import us.bringardner.parley.ssh.algorithms.SshPublicKeys;
 import us.bringardner.parley.ssh.transport.SshTransport;
 
@@ -63,6 +64,9 @@ public class ClientSession extends SshTransport {
 	private final IHostKeyVerifier verifier;
 	private final CompletableFuture<ClientSession> ready = new CompletableFuture<ClientSession>();
 	private volatile PublicKey hostKey;
+	private volatile SshCertificate hostCertificate;
+	// What the first key exchange's host key blob was: a re-key must use the same
+	private volatile byte[] hostKeyBlob;
 	// One service request at a time (RFC 4253 10)
 	private CompletableFuture<Void> serviceRequest;
 	private String requestedService;
@@ -238,6 +242,13 @@ public class ClientSession extends SshTransport {
 	 */
 	public PublicKey getServerHostKey() {
 		return hostKey;
+	}
+
+	/**
+	 * @return the host certificate the server identified itself with (null if it used a plain key)
+	 */
+	public SshCertificate getHostCertificate() {
+		return hostCertificate;
 	}
 
 	/**
@@ -632,18 +643,21 @@ public class ClientSession extends SshTransport {
 		if( !sig.getKeyType().equals(type) ) {
 			throw new SshException(SshConstants.SSH_DISCONNECT_KEY_EXCHANGE_FAILED, "Host key is "+type+", expected "+sig.getKeyType());
 		}
-		PublicKey key = SshPublicKeys.decode(blob);
+		SshCertificate cert = SshCertificate.isCertificateType(type) ? SshCertificate.decode(blob) : null;
+		PublicKey key = cert != null ? cert.getPublicKey() : SshPublicKeys.decode(blob);
 		if( !sig.verify(key, exchangeHash, signature) ) {
 			throw new SshException(SshConstants.SSH_DISCONNECT_KEY_EXCHANGE_FAILED, "Bad host key signature");
 		}
-		PublicKey known = hostKey;
+		byte[] known = hostKeyBlob;
 		if( known == null ) {
-			if( !verifier.verify(host, port, key) ) {
+			if( cert != null ? !verifier.verifyCertificate(host, port, cert) : !verifier.verify(host, port, key) ) {
 				throw new SshException(SshConstants.SSH_DISCONNECT_HOST_KEY_NOT_VERIFIABLE,
-						"Host key "+type+" "+SshPublicKeys.fingerprint(key)+" for "+host+" is not trusted");
+						"Host "+(cert != null ? "certificate " : "key ")+type+" "+SshPublicKeys.fingerprint(key)+" for "+host+" is not trusted");
 			}
 			hostKey = key;
-		} else if( !Arrays.equals(SshPublicKeys.encode(known), blob) ) {
+			hostCertificate = cert;
+			hostKeyBlob = blob.clone();
+		} else if( !Arrays.equals(known, blob) ) {
 			throw new SshException(SshConstants.SSH_DISCONNECT_HOST_KEY_NOT_VERIFIABLE, "The host key changed during re-keying");
 		}
 	}

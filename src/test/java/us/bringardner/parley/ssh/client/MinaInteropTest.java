@@ -113,6 +113,10 @@ public class MinaInteropTest {
 				// MINA needs net.i2p.crypto:eddsa for Ed25519; OpenSSH and JSch cover it
 				continue;
 			}
+			if( us.bringardner.parley.ssh.algorithms.SshCertificate.isCertificateType(SshAlgorithms.findSignature(alg).getKeyType()) ) {
+				// Only offered by servers with host certificates (see CertificateTest)
+				continue;
+			}
 			try (SshClient c = client(SshAlgorithms.defaults().setHostKeyAlgorithms(alg))) {
 				ClientSession s = connect(c);
 				assertEquals(alg, s.getNegotiated().getHostKey());

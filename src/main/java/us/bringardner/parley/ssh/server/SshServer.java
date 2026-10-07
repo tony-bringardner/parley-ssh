@@ -44,6 +44,8 @@ import us.bringardner.parley.core.NamedThreadFactory;
 import us.bringardner.parley.net.nio.LineFrameDecoder;
 import us.bringardner.parley.net.nio.NioServer;
 import us.bringardner.parley.ssh.algorithms.SshAlgorithms;
+import us.bringardner.parley.ssh.algorithms.SshCertificate;
+import us.bringardner.parley.ssh.algorithms.SshPublicKeys;
 import us.bringardner.parley.ssh.transport.SshTransport;
 
 /**
@@ -99,6 +101,7 @@ public class SshServer extends NioServer {
 	private volatile String version = SshTransport.DEFAULT_VERSION;
 	private volatile IHostKeyProvider hostKeyProvider;
 	private volatile List<KeyPair> hostKeys = Collections.emptyList();
+	private volatile List<SshCertificate> hostCertificates = Collections.emptyList();
 	private volatile List<IServerAuthMethod> authMethods;
 	private volatile IPasswordAuthenticator passwordAuthenticator;
 	private volatile IPublicKeyAuthenticator publicKeyAuthenticator;
@@ -180,7 +183,20 @@ public class SshServer extends NioServer {
 		if( keys == null || keys.isEmpty() ) {
 			throw new IOException("No host keys");
 		}
+		List<SshCertificate> certs = new ArrayList<SshCertificate>();
+		for (SshCertificate c : p.getHostCertificates()) {
+			boolean ours = false;
+			for (KeyPair kp : keys) {
+				ours |= java.util.Arrays.equals(SshPublicKeys.encode(kp.getPublic()), c.getPublicKeyBlob());
+			}
+			if( c.getCertificateType() != SshCertificate.HOST || !ours ) {
+				logWarn("Not using "+c+": "+(ours ? "not a host certificate" : "it is for none of the host keys"));
+			} else {
+				certs.add(c);
+			}
+		}
 		hostKeys = Collections.unmodifiableList(new ArrayList<KeyPair>(keys));
+		hostCertificates = Collections.unmodifiableList(certs);
 	}
 
 	// ------------------------------------------------------------------ authentication
@@ -345,6 +361,7 @@ public class SshServer extends NioServer {
 	public void setHostKeyProvider(IHostKeyProvider provider) {
 		this.hostKeyProvider = provider;
 		this.hostKeys = Collections.emptyList();
+		this.hostCertificates = Collections.emptyList();
 	}
 
 	/**
@@ -352,6 +369,13 @@ public class SshServer extends NioServer {
 	 */
 	public List<KeyPair> getHostKeys() {
 		return hostKeys;
+	}
+
+	/**
+	 * @return the host certificates in use (empty until the server starts)
+	 */
+	public List<SshCertificate> getHostCertificates() {
+		return hostCertificates;
 	}
 
 	public String getBanner() {

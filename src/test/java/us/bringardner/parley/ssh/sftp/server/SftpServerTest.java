@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.ByteArrayInputStream;
@@ -248,6 +249,81 @@ public class SftpServerTest {
 		}
 	}
 
+	private static void packet(OutputStream out, us.bringardner.parley.ssh.SshBuffer b) throws Exception {
+		byte[] body = b.toByteArray();
+		out.write(new us.bringardner.parley.ssh.SshBuffer().putInt(body.length).putRaw(body).toByteArray());
+		out.flush();
+	}
+
+	private static us.bringardner.parley.ssh.SshBuffer packet(InputStream in) throws Exception {
+		java.io.DataInputStream d = new java.io.DataInputStream(in);
+		byte[] b = new byte[d.readInt()];
+		d.readFully(b);
+		return new us.bringardner.parley.ssh.SshBuffer(b);
+	}
+
+	/** A client that starts with version 3 moves to 5 with version-select (draft 13, 5.5) */
+	@Test
+	public void versionSelect() throws Exception {
+		startOnDisk();
+		client = new SshClient();
+		client.setHostKeyVerifier(HostKeyVerifiers.acceptAll());
+		ClientSession s = client.connectAndWait("localhost", server.getLocalPort());
+		s.authenticateAndWait("alice", new PasswordAuth("secret"));
+		us.bringardner.parley.ssh.client.SessionChannel ch = s.openSession();
+		ch.subsystem("sftp");
+		OutputStream out = ch.getOutputStream();
+		InputStream in = ch.getInputStream();
+		packet(out, new us.bringardner.parley.ssh.SshBuffer().putByte(SftpConstants.SSH_FXP_INIT).putInt(3));
+		us.bringardner.parley.ssh.SshBuffer v = packet(in);
+		assertEquals(SftpConstants.SSH_FXP_VERSION, v.getByte());
+		assertEquals(3, v.getInt());
+		java.util.Map<String, String> ext = new java.util.HashMap<String, String>();
+		while( v.available() > 0 ) {
+			ext.put(v.getStringUtf8(), v.getStringUtf8());
+		}
+		assertEquals("3,4,5,6", ext.get(SftpConstants.EXT_VERSIONS));
+		packet(out, new us.bringardner.parley.ssh.SshBuffer().putByte(SftpConstants.SSH_FXP_EXTENDED).putInt(1)
+				.putString(SftpConstants.EXT_VERSION_SELECT).putString("5"));
+		us.bringardner.parley.ssh.SshBuffer r = packet(in);
+		assertEquals(SftpConstants.SSH_FXP_STATUS, r.getByte());
+		assertEquals(1, r.getInt());
+		assertEquals(SftpConstants.SSH_FX_OK, r.getInt());
+		// Now version 5: STAT carries flags, and the attributes start with a type byte
+		packet(out, new us.bringardner.parley.ssh.SshBuffer().putByte(SftpConstants.SSH_FXP_STAT).putInt(2).putString("/").putInt(0x0f));
+		r = packet(in);
+		assertEquals(SftpConstants.SSH_FXP_ATTRS, r.getByte());
+		assertEquals(2, r.getInt());
+		SftpAttrs root = SftpAttrs.read(r, 5);
+		assertTrue(root.isDirectory(), root.toString());
+		assertEquals(SftpAttrs.TYPE_DIRECTORY, root.getType());
+		// version-select only as the first request
+		packet(out, new us.bringardner.parley.ssh.SshBuffer().putByte(SftpConstants.SSH_FXP_EXTENDED).putInt(3)
+				.putString(SftpConstants.EXT_VERSION_SELECT).putString("6"));
+		r = packet(in);
+		assertEquals(SftpConstants.SSH_FXP_STATUS, r.getByte());
+		r.getInt();
+		assertEquals(SftpConstants.SSH_FX_OP_UNSUPPORTED, r.getInt(), "not first: an unknown extension");
+		ch.close();
+	}
+
+	/** Our client with our server at each version */
+	@Test
+	public void ourClientAtEachVersion() throws Exception {
+		File root = startOnDisk();
+		client = new SshClient();
+		client.setHostKeyVerifier(HostKeyVerifiers.acceptAll());
+		ClientSession s = client.connectAndWait("localhost", server.getLocalPort());
+		s.authenticateAndWait("alice", new PasswordAuth("secret"));
+		for (int v = 3; v <= 6; v++) {
+			try (SftpClient sftp = SftpClient.open(s, v)) {
+				us.bringardner.parley.ssh.sftp.SftpVersionCheck.roundTrip(sftp, "/ours"+v, v, true);
+			}
+			assertFalse(new File(root, "ours"+v).exists());
+		}
+	}
+
+	/** MINA's SFTP client at each version (it speaks 3 to 6; it asks for 6 by default) */
 	@Test
 	public void minaSftpClient() throws Exception {
 		File root = startOnDisk();
@@ -258,30 +334,100 @@ public class SftpServerTest {
 			s.addPasswordIdentity("secret");
 			s.auth().verify(Duration.ofSeconds(15));
 			try (org.apache.sshd.sftp.client.SftpClient sftp = SftpClientFactory.instance().createSftpClient(s)) {
-				assertEquals(3, sftp.getVersion());
-				sftp.mkdir("/mina");
-				byte[] data = new byte[4*1024*1024];
-				new Random(3).nextBytes(data);
-				try (OutputStream out = sftp.write("/mina/f.bin")) {
-					out.write(data);
+				assertEquals(6, sftp.getVersion(), "the highest both speak");
+			}
+			for (int v = 3; v <= 6; v++) {
+				try (org.apache.sshd.sftp.client.SftpClient sftp = SftpClientFactory.instance().createSftpClient(s,
+						org.apache.sshd.sftp.client.SftpVersionSelector.fixedVersionSelector(v))) {
+					assertEquals(v, sftp.getVersion());
+					try {
+						minaRoundTrip(sftp, root, "/mina"+v, v);
+					} catch (java.io.IOException e) {
+						throw new AssertionError("version "+v+": "+e, e);
+					}
 				}
-				try (InputStream in = sftp.read("/mina/f.bin")) {
-					assertArrayEquals(data, in.readAllBytes());
-				}
-				assertEquals(data.length, sftp.stat("/mina/f.bin").getSize());
-				int n = 0;
-				for (org.apache.sshd.sftp.client.SftpClient.DirEntry e : sftp.readDir("/mina")) {
-					n++;
-				}
-				assertEquals(3, n);
-				sftp.rename("/mina/f.bin", "/mina/g.bin");
-				sftp.remove("/mina/g.bin");
-				sftp.rmdir("/mina");
+				assertFalse(new File(root, "mina"+v).exists());
 			}
 		} finally {
 			c.stop();
 		}
-		assertFalse(new File(root, "mina").exists());
+	}
+
+	private static void minaRoundTrip(org.apache.sshd.sftp.client.SftpClient sftp, File root, String dir, int v) throws Exception {
+		String at = "version "+v+": ";
+		sftp.mkdir(dir);
+		byte[] data = new byte[1024*1024+17];
+		new Random(3+v).nextBytes(data);
+		try (OutputStream out = sftp.write(dir+"/f.bin")) {
+			out.write(data);
+		}
+		try (InputStream in = sftp.read(dir+"/f.bin")) {
+			assertArrayEquals(data, in.readAllBytes(), at+"read back");
+		}
+		org.apache.sshd.sftp.client.SftpClient.Attributes a = sftp.stat(dir+"/f.bin");
+		assertEquals(data.length, a.getSize(), at);
+		assertTrue(a.isRegularFile(), at+a);
+		assertTrue(sftp.stat(dir).isDirectory(), at);
+		if( v >= 4 ) {
+			assertNotNull(a.getOwner(), at+"owner names in the attributes");
+		}
+		// Setting times (version 3 sets both or neither; MINA sends whole seconds)
+		long when = 1_600_000_000_000L;
+		sftp.setStat(dir+"/f.bin", new org.apache.sshd.sftp.client.SftpClient.Attributes()
+				.accessTime(java.nio.file.attribute.FileTime.fromMillis(when)).modifyTime(java.nio.file.attribute.FileTime.fromMillis(when)));
+		assertEquals(when, sftp.stat(dir+"/f.bin").getModifyTime().toMillis(), at+"mtime");
+		// The server sends milliseconds from version 4, whole seconds to 3
+		assertTrue(new File(root, dir.substring(1)+"/f.bin").setLastModified(when+123));
+		assertEquals(v >= 4 ? when+123 : when, sftp.stat(dir+"/f.bin").getModifyTime().toMillis(), at+"subsecond mtime");
+
+		// Exclusive create of an existing file: FILE_ALREADY_EXISTS from 4, FAILURE in 3
+		org.apache.sshd.sftp.common.SftpException e = assertThrows(org.apache.sshd.sftp.common.SftpException.class,
+				() -> sftp.open(dir+"/f.bin", org.apache.sshd.sftp.client.SftpClient.OpenMode.Write,
+						org.apache.sshd.sftp.client.SftpClient.OpenMode.Create, org.apache.sshd.sftp.client.SftpClient.OpenMode.Exclusive).close());
+		assertEquals(v >= 4 ? SftpConstants.SSH_FX_FILE_ALREADY_EXISTS : SftpConstants.SSH_FX_FAILURE, e.getStatus(), at);
+
+		// Append (version 5+ sends it as a flag of its own)
+		try (OutputStream out = sftp.write(dir+"/f.bin", org.apache.sshd.sftp.client.SftpClient.OpenMode.Write,
+				org.apache.sshd.sftp.client.SftpClient.OpenMode.Append)) {
+			out.write(new byte[] {1, 2, 3});
+		}
+		assertEquals(data.length+3, sftp.stat(dir+"/f.bin").getSize(), at+"appended");
+
+		// Links: SYMLINK for 3 to 5, LINK for 6
+		sftp.symLink(dir+"/link", dir+"/f.bin");
+		assertTrue(sftp.lstat(dir+"/link").isSymbolicLink(), at+"a symbolic link");
+		assertEquals(dir+"/f.bin", sftp.readLink(dir+"/link"), at);
+		if( v >= 6 ) {
+			sftp.link(dir+"/hard", dir+"/f.bin", false);
+			assertEquals(data.length+3, sftp.stat(dir+"/hard").getSize(), at+"hard link");
+			sftp.remove(dir+"/hard");
+		}
+
+		int n = 0;
+		for (org.apache.sshd.sftp.client.SftpClient.DirEntry de : sftp.readDir(dir)) {
+			n++;
+			if( de.getFilename().equals("f.bin") ) {
+				assertEquals(data.length+3, de.getAttributes().getSize(), at);
+			}
+		}
+		assertEquals(4, n, at+". .. f.bin link");
+
+		// Rename over an existing file: only with overwrite (a flag from version 5)
+		try (OutputStream out = sftp.write(dir+"/g.bin")) {
+			out.write(1);
+		}
+		assertThrows(org.apache.sshd.sftp.common.SftpException.class, () -> sftp.rename(dir+"/f.bin", dir+"/g.bin"), at);
+		if( v >= 5 ) {
+			sftp.rename(dir+"/f.bin", dir+"/g.bin", org.apache.sshd.sftp.client.SftpClient.CopyMode.Overwrite);
+			assertEquals(data.length+3, sftp.stat(dir+"/g.bin").getSize(), at+"replaced");
+		} else {
+			sftp.remove(dir+"/f.bin");
+		}
+		org.apache.sshd.sftp.common.SftpException notEmpty = assertThrows(org.apache.sshd.sftp.common.SftpException.class, () -> sftp.rmdir(dir));
+		assertEquals(v >= 6 ? SftpConstants.SSH_FX_DIR_NOT_EMPTY : SftpConstants.SSH_FX_FAILURE, notEmpty.getStatus(), at);
+		sftp.remove(dir+"/g.bin");
+		sftp.remove(dir+"/link");
+		sftp.rmdir(dir);
 	}
 
 	@Test

@@ -27,7 +27,10 @@ package us.bringardner.parley.ssh.server;
 
 import java.io.IOException;
 import java.security.KeyPair;
+import java.util.Collections;
 import java.util.List;
+
+import us.bringardner.parley.ssh.algorithms.SshCertificate;
 
 /**
  * The server's host keys: what proves to clients that they reached this server.
@@ -43,4 +46,13 @@ public interface IHostKeyProvider {
 	 * @return the host key pairs (RSA and/or ECDSA), at least one
 	 */
 	List<KeyPair> getHostKeys() throws IOException;
+
+	/**
+	 * @return host certificates for some of the keys (OpenSSH's HostCertificate), so clients
+	 * that trust the certificate authority trust this server without knowing its keys; none
+	 * by default
+	 */
+	default List<SshCertificate> getHostCertificates() throws IOException {
+		return Collections.emptyList();
+	}
 }

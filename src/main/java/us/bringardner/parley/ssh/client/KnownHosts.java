@@ -45,12 +45,15 @@ import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 
 import us.bringardner.parley.core.BaseObject;
+import us.bringardner.parley.ssh.algorithms.SshAlgorithms;
+import us.bringardner.parley.ssh.algorithms.SshCertificate;
 import us.bringardner.parley.ssh.algorithms.SshPublicKeys;
 
 /**
  * Host keys from an OpenSSH known_hosts file (sshd(8) "SSH_KNOWN_HOSTS FILE FORMAT"): plain
  * and hashed (|1|salt|hash) host names, [host]:port for other ports, * and ? wildcards,
- * !negation and the @revoked marker. @cert-authority lines are skipped (no certificates yet).
+ * !negation, the @revoked marker, and @cert-authority lines: host certificates signed by such
+ * a certificate authority are trusted for the hosts the line names (see {@link #verifyCertificate}).
  * <p>
  * A key that doesn't match the one known for the host is always refused: that is what an
  * attacker pretending to be the server looks like. What happens with a host that isn't in the
@@ -278,16 +281,74 @@ public class KnownHosts extends BaseObject implements IHostKeyVerifier {
 		}
 	}
 
+	/**
+	 * @return the key types of the host's keys, and for a host with a trusted certificate
+	 * authority every certificate type, so certificates are asked for first
+	 */
 	@Override
 	public List<String> getKnownKeyTypes(String host, int port) {
 		String name = hostName(host, port);
 		List<String> ret = new ArrayList<String>();
+		boolean ca = false;
 		for (Entry e : entries) {
 			if( e.marker == null && matches(e.patterns, name) && !ret.contains(e.keyType) ) {
 				ret.add(e.keyType);
 			}
+			ca |= "@cert-authority".equals(e.marker) && matches(e.patterns, name);
+		}
+		if( ca ) {
+			List<String> certs = new ArrayList<String>();
+			for (String alg : SshAlgorithms.defaults().getHostKeyAlgorithmNames()) {
+				String type = SshAlgorithms.findSignature(alg).getKeyType();
+				if( SshCertificate.isCertificateType(type) && !certs.contains(type) ) {
+					certs.add(type);
+				}
+			}
+			certs.addAll(ret);
+			ret = certs;
 		}
 		return ret;
+	}
+
+	/**
+	 * Trusted if a @cert-authority line for the host names the certificate's CA, it is a
+	 * valid host certificate for the host now, and neither it nor its CA is @revoked.
+	 */
+	@Override
+	public boolean verifyCertificate(String host, int port, SshCertificate cert) throws IOException {
+		String name = hostName(host, port);
+		byte[] ca = cert.getCaKeyBlob();
+		byte[] key = cert.getPublicKeyBlob();
+		boolean trusted = false;
+		for (Entry e : entries) {
+			if( "@revoked".equals(e.marker) ) {
+				if( Arrays.equals(e.blob, ca) || Arrays.equals(e.blob, key) ) {
+					logError("Host certificate of "+name+" ("+cert+") is revoked");
+					return false;
+				}
+			} else if( "@cert-authority".equals(e.marker) && Arrays.equals(e.blob, ca) && matches(e.patterns, name) ) {
+				trusted = true;
+			}
+		}
+		if( !trusted ) {
+			logError("Host certificate of "+name+" is signed by a CA that is not trusted for it ("+cert+")");
+			return false;
+		}
+		String why = cert.check(SshCertificate.HOST, host, System.currentTimeMillis()/1000);
+		if( why != null ) {
+			logError("Host certificate of "+name+" refused: "+why+" ("+cert+")");
+			return false;
+		}
+		return true;
+	}
+
+	/**
+	 * Trust host certificates signed by this CA for the hosts (patterns as in a host line).
+	 */
+	public synchronized void addCertificateAuthority(String hostPatterns, PublicKey ca) throws IOException {
+		List<Entry> tmp = new ArrayList<Entry>(entries);
+		tmp.addAll(parse(Collections.singletonList("@cert-authority "+hostPatterns+" "+SshPublicKeys.toOpenSsh(ca))));
+		entries = Collections.unmodifiableList(tmp);
 	}
 
 	/**

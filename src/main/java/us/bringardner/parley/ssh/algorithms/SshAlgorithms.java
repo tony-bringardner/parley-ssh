@@ -70,6 +70,11 @@ public class SshAlgorithms {
 		signature(new RsaSignature("rsa-sha2-512", "SHA512withRSA"));
 		signature(new RsaSignature("rsa-sha2-256", "SHA256withRSA"));
 		signature(new RsaSignature("ssh-rsa", "SHA1withRSA"));
+		// Certificates after the plain keys: a client puts them first for hosts whose CA it trusts
+		for (String plain : new String[] {"ssh-ed25519", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521",
+				"rsa-sha2-512", "rsa-sha2-256", "ssh-rsa"}) {
+			signature(new CertSignature(KNOWN_SIGNATURES.get(plain)));
+		}
 
 		cipher(ChaChaPolyCipher.NAME, ChaChaPolyCipher::new);
 		cipher("aes128-gcm@openssh.com", () -> new AesGcmCipher("aes128-gcm@openssh.com", 16));
@@ -87,7 +92,7 @@ public class SshAlgorithms {
 	}
 
 	/** Known but not offered by default (SHA-1) */
-	private static final List<String> WEAK = Arrays.asList("diffie-hellman-group14-sha1", "ssh-rsa", "hmac-sha1-etm@openssh.com", "hmac-sha1");
+	private static final List<String> WEAK = Arrays.asList("diffie-hellman-group14-sha1", "ssh-rsa", "ssh-rsa-cert-v01@openssh.com", "hmac-sha1-etm@openssh.com", "hmac-sha1");
 
 	private static void kex(String name, String hash, java.util.function.Supplier<IKeyAgreement> agreement) {
 		KNOWN_KEX.put(name, NamedFactory.of(name, () -> new EphemeralKeyExchange(name, hash, agreement)));

@@ -38,6 +38,7 @@ import java.util.List;
 
 import us.bringardner.parley.core.SecureBaseObject;
 import us.bringardner.parley.ssh.SshException;
+import us.bringardner.parley.ssh.algorithms.SshCertificate;
 import us.bringardner.parley.ssh.keys.SshKeyLoader;
 import us.bringardner.parley.ssh.keys.SshKeyWriter;
 
@@ -68,17 +69,60 @@ public final class HostKeyProviders {
 	}
 
 	/**
-	 * Private key files (PEM, PKCS#8 or OpenSSH, unencrypted), e.g. /etc/ssh/ssh_host_ecdsa_key.
+	 * Private key files (PEM, PKCS#8 or OpenSSH, unencrypted), e.g. /etc/ssh/ssh_host_ecdsa_key,
+	 * with the host certificate of each that has one ("key-cert.pub", as ssh-keygen -s -h writes).
 	 */
 	public static IHostKeyProvider fromFiles(File... files) {
 		List<File> list = Arrays.asList(files.clone());
-		return () -> {
-			List<KeyPair> ret = new ArrayList<KeyPair>();
-			for (File f : list) {
-				ret.add(SshKeyLoader.load(f, null));
+		return new IHostKeyProvider() {
+			@Override
+			public List<KeyPair> getHostKeys() throws IOException {
+				List<KeyPair> ret = new ArrayList<KeyPair>();
+				for (File f : list) {
+					ret.add(SshKeyLoader.load(f, null));
+				}
+				return ret;
 			}
-			return ret;
+
+			@Override
+			public List<SshCertificate> getHostCertificates() throws IOException {
+				return certificates(list);
+			}
 		};
+	}
+
+	/**
+	 * The keys of another provider, with these host certificates.
+	 */
+	public static IHostKeyProvider withCertificates(IHostKeyProvider keys, SshCertificate... certificates) {
+		List<SshCertificate> list = Collections.unmodifiableList(Arrays.asList(certificates.clone()));
+		return new IHostKeyProvider() {
+			@Override
+			public List<KeyPair> getHostKeys() throws IOException {
+				return keys.getHostKeys();
+			}
+
+			@Override
+			public List<SshCertificate> getHostCertificates() throws IOException {
+				List<SshCertificate> ret = new ArrayList<SshCertificate>(keys.getHostCertificates());
+				ret.addAll(list);
+				return ret;
+			}
+		};
+	}
+
+	/**
+	 * @return the "-cert.pub" files next to the key files
+	 */
+	private static List<SshCertificate> certificates(List<File> keyFiles) throws IOException {
+		List<SshCertificate> ret = new ArrayList<SshCertificate>();
+		for (File f : keyFiles) {
+			File cert = new File(f.getPath()+"-cert.pub");
+			if( cert.isFile() ) {
+				ret.add(SshCertificate.load(cert));
+			}
+		}
+		return ret;
 	}
 
 	/**
@@ -87,21 +131,34 @@ public final class HostKeyProviders {
 	 * Later starts read the same keys, so clients that trust them keep trusting the server.
 	 */
 	public static IHostKeyProvider generated(File dir) {
-		return () -> {
-			List<KeyPair> ret = new ArrayList<KeyPair>();
-			List<String> names = new ArrayList<String>(Arrays.asList("ssh_host_ecdsa_key", "ssh_host_rsa_key"));
-			if( us.bringardner.parley.ssh.algorithms.Ed25519.isSupported() ) {
-				names.add(0, "ssh_host_ed25519_key");
-			}
-			for (String name : names) {
-				File f = new File(dir, name);
-				if( !f.exists() ) {
-					KeyPair kp = name.contains("ed25519") ? ed25519() : name.contains("ecdsa") ? ec() : rsa();
-					SshKeyWriter.write(kp, f, "parley-ssh host key");
+		List<String> names = new ArrayList<String>(Arrays.asList("ssh_host_ecdsa_key", "ssh_host_rsa_key"));
+		if( us.bringardner.parley.ssh.algorithms.Ed25519.isSupported() ) {
+			names.add(0, "ssh_host_ed25519_key");
+		}
+		List<File> files = new ArrayList<File>();
+		for (String name : names) {
+			files.add(new File(dir, name));
+		}
+		return new IHostKeyProvider() {
+			@Override
+			public List<KeyPair> getHostKeys() throws IOException {
+				List<KeyPair> ret = new ArrayList<KeyPair>();
+				for (File f : files) {
+					if( !f.exists() ) {
+						String name = f.getName();
+						KeyPair kp = name.contains("ed25519") ? ed25519() : name.contains("ecdsa") ? ec() : rsa();
+						SshKeyWriter.write(kp, f, "parley-ssh host key");
+					}
+					ret.add(SshKeyLoader.load(f, null));
 				}
-				ret.add(SshKeyLoader.load(f, null));
+				return ret;
 			}
-			return ret;
+
+			/** ssh_host_*_key-cert.pub, when a CA has signed one */
+			@Override
+			public List<SshCertificate> getHostCertificates() throws IOException {
+				return certificates(files);
+			}
 		};
 	}
 

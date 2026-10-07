@@ -37,6 +37,7 @@ import java.util.concurrent.ConcurrentHashMap;
 
 import us.bringardner.parley.core.BaseObject;
 import us.bringardner.parley.io.IoUtils;
+import us.bringardner.parley.ssh.algorithms.SshCertificate;
 import us.bringardner.parley.ssh.SshBuffer;
 import us.bringardner.parley.ssh.connection.ConnectionService;
 import us.bringardner.parley.ssh.connection.ForwardingChannel;
@@ -66,7 +67,7 @@ class ServerForwarding extends BaseObject {
 
 	private IForwardingFilter filter() {
 		IForwardingFilter f = session.getServer().getForwardingFilter();
-		return f != null && session.isPermitted("forward") ? f : null;
+		return f != null && session.isPermitted("forward") && session.isPermittedByCertificate(SshCertificate.PERMIT_PORT_FORWARDING) ? f : null;
 	}
 
 	private ForwardingChannel direct(SshBuffer data) throws IOException {

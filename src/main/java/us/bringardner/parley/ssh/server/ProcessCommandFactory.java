@@ -30,25 +30,33 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.Executor;
 import java.util.function.IntConsumer;
 
 import us.bringardner.parley.core.BaseObject;
 
 /**
  * Runs exec requests as operating system commands ("sh -c command", or "cmd /c command" on
- * Windows) with ProcessBuilder.
+ * Windows).
  * <p>
  * <b>The commands run as the user the server runs as</b>, whoever logged in, so only give
  * this to servers whose users may run anything that account can. It is not used unless set
  * with {@link SshServer#setCommandFactory(ICommandFactory)}.
  * <p>
  * Of the client's environment variables only LANG and LC_* are passed on (like OpenSSH's
- * default AcceptEnv). There is no pseudo terminal: Java can't make one.
+ * default AcceptEnv), and TERM with a pseudo terminal.
+ * <p>
+ * <b>Pseudo terminals</b>: when the client asks for one (ssh -t) and pty4j is on the class
+ * path (an optional dependency), the command runs on a real pseudo terminal, so interactive
+ * programs (top, vi, passwords) work, its size follows the client's window, and stdout and
+ * stderr both go to the terminal. Without pty4j, commands run without one.
  *
  * @author Tony Bringardner
+ * @see ProcessShellFactory
  */
 public class ProcessCommandFactory extends BaseObject implements ICommandFactory {
 
@@ -61,41 +69,86 @@ public class ProcessCommandFactory extends BaseObject implements ICommandFactory
 		this.directory = directory;
 	}
 
+	/**
+	 * @return true if commands can get a pseudo terminal (pty4j is on the class path)
+	 */
+	public static boolean isPtySupported() {
+		return PtyProcesses.isAvailable();
+	}
+
+	protected static boolean isWindows() {
+		return System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win");
+	}
+
 	protected List<String> commandLine(String command) {
-		boolean windows = System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win");
-		return windows ? Arrays.asList("cmd.exe", "/c", command) : Arrays.asList("/bin/sh", "-c", command);
+		return isWindows() ? Arrays.asList("cmd.exe", "/c", command) : Arrays.asList("/bin/sh", "-c", command);
+	}
+
+	public File getDirectory() {
+		return directory;
 	}
 
 	@Override
 	public ICommand create(String command, CommandEnvironment env) {
+		return processCommand(commandLine(command));
+	}
+
+	/**
+	 * @return a command that runs this command line, on a pty when the client asked for one
+	 * and pty4j is there
+	 */
+	protected ICommand processCommand(List<String> commandLine) {
 		return new ICommand() {
 			private volatile Process process;
 
 			@Override
 			public void start(CommandEnvironment env, InputStream in, OutputStream out, OutputStream err, IntConsumer exit) throws IOException {
-				ProcessBuilder pb = new ProcessBuilder(commandLine(command));
-				if( directory != null ) {
-					pb.directory(directory);
-				}
-				Map<String, String> penv = pb.environment();
-				for (Map.Entry<String, String> e : env.getEnv().entrySet()) {
-					if( e.getKey().equals("LANG") || e.getKey().startsWith("LC_") ) {
-						penv.put(e.getKey(), e.getValue());
+				boolean pty = env.hasPty() && PtyProcesses.isAvailable();
+				Process p;
+				if( pty ) {
+					Map<String, String> penv = new HashMap<String, String>(System.getenv());
+					penv.putAll(clientEnvironment(env));
+					penv.put("TERM", env.getTerm() == null || env.getTerm().isEmpty() ? "xterm" : env.getTerm());
+					p = PtyProcesses.start(commandLine, penv, directory, env.getColumns(), env.getRows());
+					env.addWindowChangeListener(() -> PtyProcesses.resize(p, env.getColumns(), env.getRows()));
+				} else {
+					ProcessBuilder pb = new ProcessBuilder(commandLine);
+					if( directory != null ) {
+						pb.directory(directory);
 					}
+					pb.environment().putAll(clientEnvironment(env));
+					p = pb.start();
 				}
-				Process p = pb.start();
 				process = p;
-				java.util.concurrent.Executor ex = env.getServer().getExecutor();
-				ex.execute(() -> pump(in, p.getOutputStream(), true));
+				Executor ex = env.getServer().getExecutor();
+				if( pty ) {
+					// Closing a pty's input would hang up the terminal: the client's EOF is typed as ^D
+					ex.execute(() -> {
+						pump(in, p.getOutputStream(), false);
+						try {
+							p.getOutputStream().write(4);
+							p.getOutputStream().flush();
+						} catch (IOException e) {
+							// the process is gone
+						}
+					});
+				} else {
+					ex.execute(() -> pump(in, p.getOutputStream(), true));
+				}
 				ex.execute(() -> {
 					// stdout and stderr are both read before the exit is reported
-					Thread errPump = new Thread(() -> pump(p.getErrorStream(), err, false), "ssh-exec-stderr");
-					errPump.setDaemon(true);
-					errPump.start();
+					Thread errPump = null;
+					if( !pty ) {
+						errPump = new Thread(() -> pump(p.getErrorStream(), err, false), "ssh-exec-stderr");
+						errPump.setDaemon(true);
+						errPump.start();
+					}
 					pump(p.getInputStream(), out, false);
 					int status;
 					try {
-						errPump.join();
+						if( errPump != null ) {
+							errPump.join();
+						}
 						status = p.waitFor();
 					} catch (InterruptedException e) {
 						Thread.currentThread().interrupt();
@@ -114,6 +167,19 @@ public class ProcessCommandFactory extends BaseObject implements ICommandFactory
 				}
 			}
 		};
+	}
+
+	/**
+	 * @return LANG and LC_* from the client (like OpenSSH's default AcceptEnv)
+	 */
+	private static Map<String, String> clientEnvironment(CommandEnvironment env) {
+		Map<String, String> ret = new HashMap<String, String>();
+		for (Map.Entry<String, String> e : env.getEnv().entrySet()) {
+			if( e.getKey().equals("LANG") || e.getKey().startsWith("LC_") ) {
+				ret.put(e.getKey(), e.getValue());
+			}
+		}
+		return ret;
 	}
 
 	private void pump(InputStream from, OutputStream to, boolean closeTo) {

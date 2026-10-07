@@ -30,6 +30,8 @@ import java.security.PublicKey;
 import java.util.Collections;
 import java.util.List;
 
+import us.bringardner.parley.ssh.algorithms.SshCertificate;
+
 /**
  * Decides whether a server's host key is trusted. Called once per connection, after the key
  * exchange proved the server holds the key's private half. Without this check anyone between
@@ -58,5 +60,16 @@ public interface IHostKeyVerifier {
 	 */
 	default List<String> getKnownKeyTypes(String host, int port) {
 		return Collections.emptyList();
+	}
+
+	/**
+	 * A server that sent a host certificate: trust it if it is signed by a certificate
+	 * authority trusted for the host. The key exchange already proved the server holds the
+	 * certified key.
+	 *
+	 * @return true to trust it; false (the default: no certificate authorities) to disconnect
+	 */
+	default boolean verifyCertificate(String host, int port, SshCertificate certificate) throws IOException {
+		return false;
 	}
 }
