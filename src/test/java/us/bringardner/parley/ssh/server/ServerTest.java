@@ -141,7 +141,7 @@ public class ServerTest {
 		s.setPublicKeyAuthenticator(new AuthorizedKeysAuthenticator(user -> "alice".equals(user) ? keys : null));
 		s.setCommandFactory((line, env) -> command(line));
 		s.setShellFactory(env -> shell());
-		s.setAuthFailureDelay(50);
+		s.setLoginFailureDelay(50);
 		server = s;
 		return s;
 	}
@@ -222,7 +222,7 @@ public class ServerTest {
 	@Test
 	public void tooManyFailuresDisconnects() throws Exception {
 		start();
-		server.setMaxAuthTries(3);
+		server.setMaxLoginAttempts(3);
 		server.startAndWait(5000);
 		ClientSession s = connect(null);
 		for (int i = 0; i < 2; i++) {
@@ -238,7 +238,7 @@ public class ServerTest {
 	@Test
 	public void loginTimeLimit() throws Exception {
 		start();
-		server.setLoginGraceTime(500);
+		server.setLoginTimeLimit(500);
 		server.startAndWait(5000);
 		ClientSession s = connect(null);
 		Thread.sleep(1500);

@@ -29,7 +29,6 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.nio.file.attribute.PosixFilePermissions;
 import java.math.BigInteger;
 import java.security.KeyPair;
 import java.security.PrivateKey;
@@ -40,6 +39,7 @@ import java.security.interfaces.RSAPrivateCrtKey;
 import java.util.Arrays;
 import java.util.Base64;
 
+import us.bringardner.parley.core.util.PrivateKeys;
 import us.bringardner.parley.ssh.SshBuffer;
 import us.bringardner.parley.ssh.algorithms.Ed25519;
 import us.bringardner.parley.ssh.algorithms.SshPublicKeys;
@@ -60,8 +60,7 @@ public final class SshKeyWriter {
 	 * @return "-----BEGIN PRIVATE KEY-----" PEM of the key's PKCS#8 encoding
 	 */
 	public static String toPkcs8Pem(PrivateKey key) {
-		String b64 = Base64.getMimeEncoder(64, "\n".getBytes(StandardCharsets.US_ASCII)).encodeToString(key.getEncoded());
-		return "-----BEGIN PRIVATE KEY-----\n"+b64+"\n-----END PRIVATE KEY-----\n";
+		return PrivateKeys.toPkcs8Pem(key);
 	}
 
 	/**
@@ -122,14 +121,7 @@ public final class SshKeyWriter {
 		}
 		// Created empty with owner-only permissions first, so the key is never readable by others
 		Files.deleteIfExists(file.toPath());
-		try {
-			Files.createFile(file.toPath(), PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
-		} catch (UnsupportedOperationException e) {
-			// Not a POSIX file system (Windows): rely on the directory's permissions
-			Files.createFile(file.toPath());
-		}
-		String text = openSshFormat ? toOpenSsh(pair, comment) : toPkcs8Pem(pair.getPrivate());
-		Files.write(file.toPath(), text.getBytes(StandardCharsets.US_ASCII));
+		PrivateKeys.writePrivateFile(file, openSshFormat ? toOpenSsh(pair, comment) : toPkcs8Pem(pair.getPrivate()));
 		String pub = SshPublicKeys.toOpenSsh(pair.getPublic())+(comment == null ? "" : " "+comment)+"\n";
 		Files.write(new File(file.getPath()+".pub").toPath(), pub.getBytes(StandardCharsets.US_ASCII));
 	}

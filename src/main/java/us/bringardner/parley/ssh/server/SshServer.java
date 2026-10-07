@@ -62,8 +62,9 @@ import us.bringardner.parley.ssh.transport.SshTransport;
  * {@link #setPasswordAuthenticator(IPasswordAuthenticator)}), publickey through
  * {@link #setPublicKeyAuthenticator(IPublicKeyAuthenticator)} (e.g.
  * {@link AuthorizedKeysAuthenticator}), or any {@link IServerAuthMethod}s. At most
- * {@link #setMaxAuthTries(int)} failures, each answered after a delay, within
- * {@link #setLoginGraceTime(long)}.
+ * {@link #setMaxLoginAttempts(int)} failures, each answered after
+ * {@link #setLoginFailureDelay(int)}, within {@link #setLoginTimeLimit(int)} (OpenSSH's
+ * defaults: 6 tries, 2 minutes; 250 ms delay).
  * <p>
  * <b>Host keys</b> come from {@link #setHostKeyProvider(IHostKeyProvider)}; else from the key
  * store when KeyStoreName is set; else they are made once in the HostKeyDir property's
@@ -84,9 +85,12 @@ public class SshServer extends NioServer {
 	public static final String PROPERTY_HOST_KEY_DIR = "HostKeyDir";
 	/** Class name of the {@link IShellFactory} to use (public no-argument constructor), e.g. a factory from fsh, the FileSource Shell */
 	public static final String PROPERTY_SHELL_FACTORY = "ShellFactory";
+	/** Like OpenSSH's MaxAuthTries: clients try each of their keys, and each refused key counts */
 	public static final int DEFAULT_MAX_AUTH_TRIES = 6;
-	public static final long DEFAULT_LOGIN_GRACE_TIME = 120000;
-	public static final long DEFAULT_AUTH_FAILURE_DELAY = 250;
+	/** Like OpenSSH's LoginGraceTime */
+	public static final int DEFAULT_LOGIN_GRACE_TIME = 120000;
+	/** Short, because refused keys are failures too */
+	public static final int DEFAULT_AUTH_FAILURE_DELAY = 250;
 
 	private final SecureRandom random = new SecureRandom();
 	private final ExecutorService executor = Executors.newCachedThreadPool(NamedThreadFactory.numbered("SshServer-"));
@@ -103,9 +107,6 @@ public class SshServer extends NioServer {
 	private volatile boolean shellFactoryConfigured;
 	private final Map<String, ISubsystemFactory> subsystems = new ConcurrentHashMap<String, ISubsystemFactory>();
 	private volatile String banner;
-	private volatile int maxAuthTries = DEFAULT_MAX_AUTH_TRIES;
-	private volatile long loginGraceTime = DEFAULT_LOGIN_GRACE_TIME;
-	private volatile long authFailureDelay = DEFAULT_AUTH_FAILURE_DELAY;
 	private volatile int maxChannelsPerSession = 10;
 	private volatile IForwardingFilter forwardingFilter;
 
@@ -364,37 +365,22 @@ public class SshServer extends NioServer {
 		this.banner = banner;
 	}
 
-	public int getMaxAuthTries() {
-		return maxAuthTries;
+	// The login limits are the framework's (MaxLoginAttempts, LoginFailureDelay and
+	// LoginTimeLimit, set like any server setting), with OpenSSH's defaults
+
+	@Override
+	protected int getDefaultMaxLoginAttempts() {
+		return DEFAULT_MAX_AUTH_TRIES;
 	}
 
-	/**
-	 * @param tries authentication failures before the connection is closed (OpenSSH: 6)
-	 */
-	public void setMaxAuthTries(int tries) {
-		this.maxAuthTries = tries;
+	@Override
+	protected int getDefaultLoginFailureDelay() {
+		return DEFAULT_AUTH_FAILURE_DELAY;
 	}
 
-	public long getLoginGraceTime() {
-		return loginGraceTime;
-	}
-
-	/**
-	 * @param milliSeconds time to log in before the connection is closed, 0 for no limit
-	 */
-	public void setLoginGraceTime(long milliSeconds) {
-		this.loginGraceTime = milliSeconds;
-	}
-
-	public long getAuthFailureDelay() {
-		return authFailureDelay;
-	}
-
-	/**
-	 * @param milliSeconds how long a failed attempt waits for its answer (slows down guessing)
-	 */
-	public void setAuthFailureDelay(long milliSeconds) {
-		this.authFailureDelay = milliSeconds;
+	@Override
+	protected int getDefaultLoginTimeLimit() {
+		return DEFAULT_LOGIN_GRACE_TIME;
 	}
 
 	public IForwardingFilter getForwardingFilter() {

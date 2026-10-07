@@ -160,7 +160,7 @@ public class ServerSession extends SshTransport {
 	@Override
 	public void onConnect(INioConnection c) throws Exception {
 		super.onConnect(c);
-		long grace = server.getLoginGraceTime();
+		long grace = server.getLoginTimeLimit();
 		if( grace > 0 ) {
 			loginTimer = server.getScheduler().schedule(() -> {
 				if( !authenticated ) {
@@ -330,12 +330,12 @@ public class ServerSession extends SshTransport {
 	private void failed(String name) throws IOException {
 		failures++;
 		logDebug(() -> "Authentication failure "+failures+" for "+name+" from "+getConnection().getRemoteAddress());
-		if( failures >= server.getMaxAuthTries() ) {
+		if( server.isTooManyLoginFailures(failures) ) {
 			logInfo("Too many authentication failures for "+name+" from "+getConnection().getRemoteAddress());
 			disconnect(SshConstants.SSH_DISCONNECT_NO_MORE_AUTH_METHODS_AVAILABLE, "Too many authentication failures");
 			return;
 		}
-		long delay = server.getAuthFailureDelay();
+		long delay = server.getLoginFailureDelay();
 		if( delay > 0 ) {
 			// Slows down guessing; the client waits for the answer, the thread doesn't
 			server.getScheduler().schedule(() -> {
