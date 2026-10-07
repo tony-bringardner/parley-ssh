@@ -125,7 +125,7 @@ Parley servers).
 | `AuthenticationProvider` | Class name of the access control list (users, passwords, permissions), e.g. `us.bringardner.parley.net.server.FileBasedAcl` | none |
 | `HostKeyDir` | Where host keys are made and kept (with `*-cert.pub` host certificates) | the working directory |
 | `KeyStoreName`, `KeyStorePassword`, `KeyStoreType` | Host keys from a key store's RSA and EC entries instead of `HostKeyDir` | not used |
-| `ShellFactory` | Class name of the `IShellFactory` that answers "shell" requests | none: shells are refused |
+| `ShellFactory` | Class name of the `IShellFactory` that answers "shell" requests, or `none` | fsh when it is on the class path, else none (shells refused) |
 | `RevokedKeys` | A key revocation list or list of keys that can't log in | none |
 | `MaxLoginAttempts` | Failed logins before the connection is closed | 6 |
 | `LoginFailureDelay` | Milliseconds before a failed login is answered | 250 |
@@ -141,7 +141,7 @@ servers that block a thread per connection).
 |---|---|---|
 | `setPasswordAuthenticator`, `setPublicKeyAuthenticator`, `setAuthMethods` | How users log in | the access control list for passwords |
 | `setHostKeyProvider` | Where host keys (and host certificates) come from | `HostKeyDir` or the key store |
-| `setCommandFactory`, `setShellFactory`, `addSubsystem` | What "exec", "shell" and subsystem requests run | nothing: refused |
+| `setCommandFactory`, `setShellFactory`, `addSubsystem` | What "exec", "shell" and subsystem requests run | refused, except shells: fsh when it is on the class path |
 | `setForwardingFilter` | Which port forwardings are allowed (`ForwardingFilters.localOnly()`...) | none: refused |
 | `setAgentForwardingAllowed` | Whether clients may forward their agent | yes, as OpenSSH |
 | `setRevokedKeys` | Keys and certificates that can't log in | none |
@@ -170,8 +170,17 @@ permission).
 ## Shells
 
 `SshServer` answers "shell" requests (an interactive `ssh host`) through an `IShellFactory`, set in
-code or named with the `ShellFactory` property. `ProcessShellFactory` runs the operating system's
-login shell; fsh, the FileSource Shell, is another (`us.bringardner.fsh.ssh.FshShellFactory`).
+code or named with the `ShellFactory` property.
+
+**fsh, the FileSource Shell, is the default**: when no shell is configured and fsh
+(`us.bringardner.fsh.ssh.FshShellFactory`) is on the class path, users who log in get fsh. It needs
+Java 21; on older JVMs, or without fsh, shell requests are refused. `ShellFactory=none` turns the
+default off, and setting another shell replaces it. `ProcessShellFactory` runs the operating
+system's login shell instead.
+
+**fsh works with the access of the account the server runs as**, whoever logged in. Adding fsh to a
+server's class path gives every user who can log in a shell (with an access control list, only
+users with the "shell" permission): set `ShellFactory=none` if they shouldn't have one.
 
 ## Not supported
 

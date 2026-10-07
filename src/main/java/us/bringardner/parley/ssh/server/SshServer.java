@@ -55,7 +55,7 @@ import us.bringardner.parley.ssh.transport.SshTransport;
  * <p>
  * <b>What it runs</b> is up to the plug-ins: {@link #setCommandFactory(ICommandFactory)} for
  * exec, {@link #setShellFactory(IShellFactory)} (or the {@value #PROPERTY_SHELL_FACTORY}
- * property) for an interactive shell,
+ * property; fsh by default when it is on the class path) for an interactive shell,
  * {@link #addSubsystem(ISubsystemFactory)} for subsystems such as SFTP. Without them those
  * requests are refused. With an access control list, a user also needs the permission
  * ("exec", "shell", or the subsystem name).
@@ -85,8 +85,13 @@ import us.bringardner.parley.ssh.transport.SshTransport;
 public class SshServer extends NioServer {
 
 	public static final String PROPERTY_HOST_KEY_DIR = "HostKeyDir";
-	/** Class name of the {@link IShellFactory} to use (public no-argument constructor), e.g. a factory from fsh, the FileSource Shell */
+	/**
+	 * Class name of the {@link IShellFactory} to use (public no-argument constructor), or "none"
+	 * for no shell; without it, fsh ({@value #DEFAULT_SHELL_FACTORY}) when it is on the class path
+	 */
 	public static final String PROPERTY_SHELL_FACTORY = "ShellFactory";
+	/** The shell used when none is configured and it is on the class path: fsh, the FileSource Shell */
+	public static final String DEFAULT_SHELL_FACTORY = "us.bringardner.fsh.ssh.FshShellFactory";
 	/** A KRL or list of public keys (OpenSSH's RevokedKeys): those keys and certificates can't log in */
 	public static final String PROPERTY_REVOKED_KEYS = "RevokedKeys";
 	/** Like OpenSSH's MaxAuthTries: clients try each of their keys, and each refused key counts */
@@ -295,7 +300,9 @@ public class SshServer extends NioServer {
 
 	/**
 	 * @return the factory set with {@link #setShellFactory(IShellFactory)}, else one made from
-	 * the {@value #PROPERTY_SHELL_FACTORY} property, else null (shell requests are refused)
+	 * the {@value #PROPERTY_SHELL_FACTORY} property, else fsh when it is on the class path
+	 * (and the JVM can run it: Java 21+), else null (shell requests are refused). The
+	 * property "none" means no shell, even with fsh there.
 	 * @throws IllegalStateException if the property names a class that can't be made
 	 */
 	public IShellFactory getShellFactory() {
@@ -303,7 +310,9 @@ public class SshServer extends NioServer {
 			synchronized (this) {
 				if( shellFactory == null && !shellFactoryConfigured ) {
 					String tmp = getProperty(PROPERTY_SHELL_FACTORY);
-					if( tmp != null && !tmp.trim().isEmpty() ) {
+					if( tmp != null && tmp.trim().equalsIgnoreCase("none") ) {
+						logInfo("No shell in server "+getName()+" (ShellFactory=none)");
+					} else if( tmp != null && !tmp.trim().isEmpty() ) {
 						try {
 							Class<?> c = Class.forName(tmp.trim());
 							shellFactory = (IShellFactory) c.getDeclaredConstructor().newInstance();
@@ -312,7 +321,12 @@ public class SshServer extends NioServer {
 							throw new IllegalStateException("Can't configure shell factory class='"+tmp+"'", e);
 						}
 					} else {
-						logInfo("No shell defined in server "+getName());
+						shellFactory = defaultShellFactory();
+						if( shellFactory == null ) {
+							logInfo("No shell defined in server "+getName());
+						} else {
+							logInfo("Server "+getName()+" uses fsh as its shell (ShellFactory=none turns it off)");
+						}
 					}
 					shellFactoryConfigured = true;
 				}
@@ -322,8 +336,24 @@ public class SshServer extends NioServer {
 	}
 
 	/**
+	 * @return fsh's shell factory, or null if fsh isn't on the class path or this JVM can't run it
+	 */
+	private IShellFactory defaultShellFactory() {
+		try {
+			Class<?> c = Class.forName(DEFAULT_SHELL_FACTORY);
+			return (IShellFactory) c.getDeclaredConstructor().newInstance();
+		} catch (ClassNotFoundException e) {
+			return null;
+		} catch (Exception | LinkageError e) {
+			// e.g. fsh needs Java 21
+			logInfo("fsh is on the class path but can't be used as the shell: "+e);
+			return null;
+		}
+	}
+
+	/**
 	 * @param factory runs "shell" requests; null to look at the {@value #PROPERTY_SHELL_FACTORY}
-	 * property again on the next use (with no property, shell requests are refused)
+	 * property (and the fsh default) again on the next use
 	 */
 	public void setShellFactory(IShellFactory factory) {
 		this.shellFactory = factory;

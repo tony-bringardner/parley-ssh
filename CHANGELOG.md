@@ -36,9 +36,11 @@ version 6.
 - **SFTP versions 4 to 6**: the server speaks the client's version up to 6 (and `version-select`);
   the client asks for 3 by default, up to 6 with `SftpClient.open(session, version)`.
   `SftpAttrs` reads and writes every version (file type, owner names, nanosecond times).
-- `ShellFactory` property: the shell is chosen by class name (e.g. fsh's
-  `us.bringardner.fsh.ssh.FshShellFactory`); a class that can't be made stops the server from
-  starting.
+- `ShellFactory` property: the shell is chosen by class name; a class that can't be made stops the
+  server from starting.
+- **fsh is the default shell**: with no shell configured, a server whose class path has fsh
+  (`us.bringardner.fsh.ssh.FshShellFactory`, Java 21+) gives users fsh. `ShellFactory=none` turns
+  it off.
 
 ### Changed (needs a code change)
 
@@ -68,6 +70,9 @@ version 6.
 
 ### Fixed
 
+- Port forwarding sometimes lost the end of the data (about half the time with several large
+  transfers at once): when the far side closed the channel, the local socket was closed before
+  the data already received had been written to it.
 - The `secure` property (meant for TLS servers) is ignored by `SshServer` and `SshClient`: set,
   even without the class name prefix, it made them speak TLS so no SSH peer could connect.
   `SshServer.setSecure(true)` now throws `IllegalArgumentException`.

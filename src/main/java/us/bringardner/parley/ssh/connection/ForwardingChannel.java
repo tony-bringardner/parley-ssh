@@ -121,9 +121,11 @@ public class ForwardingChannel extends SshChannel {
 				}
 			}
 		};
+		// The channel closed: stop reading the socket, but let what the channel already
+		// received reach it (closing the socket here cut off the end of the data)
 		getCloseFuture().whenComplete((v, e) -> {
 			try {
-				socket.close();
+				socket.shutdownInput();
 			} catch (IOException ex) {
 				// closed
 			}

@@ -3,6 +3,7 @@ package us.bringardner.parley.ssh.server;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -344,6 +345,37 @@ public class ServerTest {
 		} finally {
 			System.clearProperty("secure");
 			System.clearProperty(SshServer.class.getName()+".secure");
+		}
+	}
+
+	/** fsh is the shell when none is configured and it is on the class path; "none" turns it off */
+	@Test
+	public void fshIsTheDefaultShell() throws Exception {
+		start();
+		server.setShellFactory(null);
+		server.startAndWait(5000);
+		assertTrue(server.getShellFactory() instanceof us.bringardner.fsh.ssh.FshShellFactory, "the default");
+		ClientSession s = connect(null);
+		s.authenticateAndWait("alice", new PasswordAuth("secret"));
+		SessionChannel sh = s.openSession();
+		sh.shell();
+		assertEquals("fsh stand-in\n", new String(sh.getInputStream().readAllBytes(), StandardCharsets.UTF_8));
+		s.close();
+		server.stop(5000, false);
+
+		System.setProperty(SshServer.class.getName()+"."+SshServer.PROPERTY_SHELL_FACTORY, "none");
+		try {
+			start();
+			server.setShellFactory(null);
+			server.startAndWait(5000);
+			assertNull(server.getShellFactory(), "ShellFactory=none");
+			ClientSession t = connect(null);
+			t.authenticateAndWait("alice", new PasswordAuth("secret"));
+			SessionChannel sh2 = t.openSession();
+			assertThrows(SshException.class, sh2::shell);
+			t.close();
+		} finally {
+			System.clearProperty(SshServer.class.getName()+"."+SshServer.PROPERTY_SHELL_FACTORY);
 		}
 	}
 
