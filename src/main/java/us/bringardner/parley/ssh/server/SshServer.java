@@ -116,6 +116,8 @@ public class SshServer extends NioServer {
 	private volatile int maxChannelsPerSession = 10;
 	private volatile IForwardingFilter forwardingFilter;
 	private volatile boolean agentForwarding = true;
+	private volatile boolean securityKeyTouchRequired;
+	private volatile boolean securityKeyVerifyRequired;
 
 	public SshServer() {
 		this(22);
@@ -425,6 +427,31 @@ public class SshServer extends NioServer {
 	@Override
 	protected int getDefaultLoginTimeLimit() {
 		return DEFAULT_LOGIN_GRACE_TIME;
+	}
+
+	public boolean isSecurityKeyTouchRequired() {
+		return securityKeyTouchRequired;
+	}
+
+	/**
+	 * @param required true to require that users touch their security key even when the key
+	 * or certificate says no-touch-required (OpenSSH's PubkeyAuthOptions touch-required);
+	 * without it touch is required unless the key says otherwise
+	 */
+	public void setSecurityKeyTouchRequired(boolean required) {
+		this.securityKeyTouchRequired = required;
+	}
+
+	public boolean isSecurityKeyVerifyRequired() {
+		return securityKeyVerifyRequired;
+	}
+
+	/**
+	 * @param required true to require user verification (PIN, biometrics) for every security
+	 * key login (OpenSSH's PubkeyAuthOptions verify-required)
+	 */
+	public void setSecurityKeyVerifyRequired(boolean required) {
+		this.securityKeyVerifyRequired = required;
 	}
 
 	public boolean isAgentForwardingAllowed() {

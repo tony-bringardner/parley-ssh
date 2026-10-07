@@ -82,6 +82,10 @@ public final class SshCertificate {
 	public static final String PERMIT_AGENT_FORWARDING = "permit-agent-forwarding";
 	public static final String PERMIT_X11_FORWARDING = "permit-X11-forwarding";
 	public static final String PERMIT_USER_RC = "permit-user-rc";
+	/** Security keys: extension, the user need not touch the key */
+	public static final String NO_TOUCH_REQUIRED = "no-touch-required";
+	/** Security keys: critical option, the user must be verified (PIN, biometrics) */
+	public static final String VERIFY_REQUIRED = "verify-required";
 
 	private final byte[] blob;
 	private final String type;
@@ -130,14 +134,17 @@ public final class SshCertificate {
 	 * @return the plain key type of a certificate type ("ssh-ed25519-cert-v01@openssh.com" to "ssh-ed25519")
 	 */
 	public static String plainType(String certificateType) {
-		return certificateType.substring(0, certificateType.length()-SUFFIX.length());
+		String base = certificateType.substring(0, certificateType.length()-SUFFIX.length());
+		// Security key types keep their @openssh.com: sk-ssh-ed25519-cert-v01@openssh.com
+		return base.startsWith("sk-") ? base+"@openssh.com" : base;
 	}
 
 	/**
 	 * @return the certificate type of a plain key type ("ssh-ed25519" to "ssh-ed25519-cert-v01@openssh.com")
 	 */
 	public static String certificateType(String plainType) {
-		return plainType+SUFFIX;
+		String base = plainType.endsWith("@openssh.com") ? plainType.substring(0, plainType.length()-"@openssh.com".length()) : plainType;
+		return base+SUFFIX;
 	}
 
 	// ------------------------------------------------------------------ reading
@@ -164,6 +171,13 @@ public final class SshCertificate {
 			b.getString();
 		} else if( Ed25519.SSH_ED25519.equals(plain) ) {
 			b.getString();
+		} else if( SkPublicKey.SK_ECDSA.equals(plain) ) {
+			b.getString();
+			b.getString();
+			b.getString(); // application
+		} else if( SkPublicKey.SK_ED25519.equals(plain) ) {
+			b.getString();
+			b.getString(); // application
 		} else {
 			throw new SshException("Unsupported certificate type "+type);
 		}

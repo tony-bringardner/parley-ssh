@@ -117,6 +117,10 @@ public class MinaInteropTest {
 				// Only offered by servers with host certificates (see CertificateTest)
 				continue;
 			}
+			if( us.bringardner.parley.ssh.algorithms.SkPublicKey.isSkType(alg) ) {
+				// Security keys are for users: no server has one as its host key
+				continue;
+			}
 			try (SshClient c = client(SshAlgorithms.defaults().setHostKeyAlgorithms(alg))) {
 				ClientSession s = connect(c);
 				assertEquals(alg, s.getNegotiated().getHostKey());

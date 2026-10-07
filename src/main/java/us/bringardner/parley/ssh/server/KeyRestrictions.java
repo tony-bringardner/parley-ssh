@@ -49,6 +49,11 @@ public final class KeyRestrictions {
 	/** No restrictions (a plain key without options, or a password) */
 	public static final KeyRestrictions NONE = new KeyRestrictions(null, true, true, true, true, true, null, null);
 
+	/** Security keys: the user must touch the key (unless no-touch-required) */
+	private boolean touchRequired = true;
+	/** Security keys: the user must also be verified, e.g. with a PIN (verify-required) */
+	private boolean verifyRequired;
+
 	private final String forceCommand;
 	private final boolean pty;
 	private final boolean portForwarding;
@@ -75,13 +80,25 @@ public final class KeyRestrictions {
 	}
 
 	/**
-	 * @return a certificate's: force-command, and only the permit-* extensions it has
+	 * @return a copy with the security key settings (no-touch-required, verify-required)
+	 */
+	public KeyRestrictions withSecurityKey(boolean touchRequired, boolean verifyRequired) {
+		KeyRestrictions r = new KeyRestrictions(forceCommand, pty, portForwarding, agentForwarding, x11Forwarding, userRc, permitOpen, permitListen);
+		r.touchRequired = touchRequired;
+		r.verifyRequired = verifyRequired;
+		return r;
+	}
+
+	/**
+	 * @return a certificate's: force-command, only the permit-* extensions it has, and for
+	 * security keys no-touch-required (extension) and verify-required (critical option)
 	 */
 	public static KeyRestrictions of(SshCertificate c) {
 		return new KeyRestrictions(c.getCriticalOptions().get(SshCertificate.FORCE_COMMAND),
 				c.hasExtension(SshCertificate.PERMIT_PTY), c.hasExtension(SshCertificate.PERMIT_PORT_FORWARDING),
 				c.hasExtension(SshCertificate.PERMIT_AGENT_FORWARDING), c.hasExtension(SshCertificate.PERMIT_X11_FORWARDING),
-				c.hasExtension(SshCertificate.PERMIT_USER_RC), null, null);
+				c.hasExtension(SshCertificate.PERMIT_USER_RC), null, null)
+				.withSecurityKey(!c.hasExtension(SshCertificate.NO_TOUCH_REQUIRED), c.getCriticalOptions().containsKey(SshCertificate.VERIFY_REQUIRED));
 	}
 
 	/**
@@ -91,9 +108,11 @@ public final class KeyRestrictions {
 		if( forceCommand != null && o.forceCommand != null && !forceCommand.equals(o.forceCommand) ) {
 			return null;
 		}
+		// Touch is waived only if both waive it (OpenSSH: the key's options and the certificate)
 		return new KeyRestrictions(forceCommand != null ? forceCommand : o.forceCommand, pty && o.pty,
 				portForwarding && o.portForwarding, agentForwarding && o.agentForwarding, x11Forwarding && o.x11Forwarding,
-				userRc && o.userRc, both(permitOpen, o.permitOpen), both(permitListen, o.permitListen));
+				userRc && o.userRc, both(permitOpen, o.permitOpen), both(permitListen, o.permitListen))
+				.withSecurityKey(touchRequired || o.touchRequired, verifyRequired || o.verifyRequired);
 	}
 
 	private static List<String> both(List<String> a, List<String> b) {
@@ -107,6 +126,16 @@ public final class KeyRestrictions {
 		List<String> ret = new ArrayList<String>(a);
 		ret.retainAll(b);
 		return ret;
+	}
+
+	/** @return true if a security key must report that the user touched it */
+	public boolean isTouchRequired() {
+		return touchRequired;
+	}
+
+	/** @return true if a security key must report that the user was verified (PIN, biometrics) */
+	public boolean isVerifyRequired() {
+		return verifyRequired;
 	}
 
 	/** @return the only command the key may run, or null */

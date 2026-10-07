@@ -70,9 +70,12 @@ public class SshAlgorithms {
 		signature(new RsaSignature("rsa-sha2-512", "SHA512withRSA"));
 		signature(new RsaSignature("rsa-sha2-256", "SHA256withRSA"));
 		signature(new RsaSignature("ssh-rsa", "SHA1withRSA"));
+		// FIDO security keys (for users: there are no security key host keys)
+		signature(new SkSignature(SkPublicKey.SK_ED25519));
+		signature(new SkSignature(SkPublicKey.SK_ECDSA));
 		// Certificates after the plain keys: a client puts them first for hosts whose CA it trusts
 		for (String plain : new String[] {"ssh-ed25519", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521",
-				"rsa-sha2-512", "rsa-sha2-256", "ssh-rsa"}) {
+				SkPublicKey.SK_ED25519, SkPublicKey.SK_ECDSA, "rsa-sha2-512", "rsa-sha2-256", "ssh-rsa"}) {
 			signature(new CertSignature(KNOWN_SIGNATURES.get(plain)));
 		}
 

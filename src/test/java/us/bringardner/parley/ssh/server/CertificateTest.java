@@ -240,7 +240,7 @@ public class CertificateTest {
 		refused(alice, user(alice, ca, null, userExtensions(), "bob"), "for another user");
 		refused(alice, SshCertificate.sign(alice.getPublic(), SshCertificate.USER, "old", Arrays.asList("alice"), NOW-7200, NOW-3600, null, null, ca), "expired");
 		refused(alice, SshCertificate.sign(alice.getPublic(), SshCertificate.HOST, "host", Arrays.asList("alice"), NOW-60, NOW+60, null, null, ca), "a host certificate");
-		refused(alice, user(alice, ca, Collections.singletonMap("verify-required", ""), userExtensions(), "alice"), "unknown critical option");
+		refused(alice, user(alice, ca, Collections.singletonMap("no-such-critical-option", ""), userExtensions(), "alice"), "unknown critical option");
 		refused(alice, user(alice, ca, Collections.singletonMap(SshCertificate.SOURCE_ADDRESS, "10.0.0.0/8"), userExtensions(), "alice"), "from elsewhere");
 		login(alice, user(alice, ca, Collections.singletonMap(SshCertificate.SOURCE_ADDRESS, "127.0.0.1/32,::1/128"), userExtensions(), "alice")).close();
 

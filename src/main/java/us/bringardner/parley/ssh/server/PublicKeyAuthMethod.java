@@ -33,6 +33,8 @@ import us.bringardner.parley.ssh.SshBuffer;
 import us.bringardner.parley.ssh.SshConstants;
 import us.bringardner.parley.ssh.SshException;
 import us.bringardner.parley.ssh.algorithms.ISignatureAlgorithm;
+import us.bringardner.parley.ssh.algorithms.SkPublicKey;
+import us.bringardner.parley.ssh.algorithms.SkSignature;
 import us.bringardner.parley.ssh.algorithms.SshCertificate;
 import us.bringardner.parley.ssh.algorithms.SshPublicKeys;
 
@@ -61,6 +63,24 @@ public class PublicKeyAuthMethod implements IServerAuthMethod {
 	@Override
 	public String getName() {
 		return "publickey";
+	}
+
+	/**
+	 * A security key's signature says whether the user touched it and was verified: what the
+	 * key, its certificate and the server require (PROTOCOL.u2f, as OpenSSH's sshd checks).
+	 */
+	private static boolean securityKeyFlagsOk(SshServer server, KeyRestrictions r, int flags, String user) {
+		boolean touch = r.isTouchRequired() || server.isSecurityKeyTouchRequired();
+		boolean verify = r.isVerifyRequired() || server.isSecurityKeyVerifyRequired();
+		if( touch && (flags & SkSignature.FLAG_USER_PRESENT) == 0 ) {
+			server.logInfo("Security key login refused for "+user+": the key wasn't touched");
+			return false;
+		}
+		if( verify && (flags & SkSignature.FLAG_USER_VERIFIED) == 0 ) {
+			server.logInfo("Security key login refused for "+user+": the user wasn't verified (PIN)");
+			return false;
+		}
+		return true;
 	}
 
 	@Override
@@ -92,16 +112,17 @@ public class PublicKeyAuthMethod implements IServerAuthMethod {
 		// The authenticator may say what the key may do (authorized_keys options)
 		context.getAttributes().remove(KeyRestrictions.ATTRIBUTE);
 		IPrincipal p = cert != null ? authenticator.authenticate(user, cert, context) : authenticator.authenticate(user, key, context);
-		KeyRestrictions r = (KeyRestrictions) context.getAttributes().remove(KeyRestrictions.ATTRIBUTE);
-		if( r == null ) {
-			r = KeyRestrictions.NONE;
-		}
+		KeyRestrictions line = (KeyRestrictions) context.getAttributes().remove(KeyRestrictions.ATTRIBUTE);
+		KeyRestrictions r;
 		if( cert != null ) {
-			r = r.and(KeyRestrictions.of(cert));
+			// The certificate's, and the cert-authority line's when there is one
+			r = line == null ? KeyRestrictions.of(cert) : line.and(KeyRestrictions.of(cert));
 			if( r == null ) {
 				// The certificate and the authorized_keys line force different commands
 				return Result.FAILURE;
 			}
+		} else {
+			r = line == null ? KeyRestrictions.NONE : line;
 		}
 		if( p == null ) {
 			return Result.FAILURE;
@@ -121,6 +142,9 @@ public class PublicKeyAuthMethod implements IServerAuthMethod {
 		b.putString(alg);
 		b.putString(blob);
 		if( !sig.verify(key, b.toByteArray(), signature) ) {
+			return Result.FAILURE;
+		}
+		if( key instanceof SkPublicKey && !securityKeyFlagsOk(context.getServer(), r, SkSignature.flags(signature), user) ) {
 			return Result.FAILURE;
 		}
 		if( cert != null ) {

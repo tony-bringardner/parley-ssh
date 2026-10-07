@@ -63,6 +63,7 @@ import us.bringardner.parley.ssh.algorithms.SshPublicKeys;
  * no-pty, no-port-forwarding, no-agent-forwarding, no-X11-forwarding, no-user-rc,
  * restrict (all of those) and pty, port-forwarding, agent-forwarding, X11-forwarding, user-rc
  * to allow them again, permitopen="host:port", permitlisten="[host:]port", and
+ * no-touch-required and verify-required for security keys (sk-ecdsa, sk-ed25519), and
  * cert-authority with principals="...": the line's key is a certificate authority whose
  * user certificates may log in as this user (for the user's name, or one of the principals).
  * environment= and tunnel= are ignored (as OpenSSH does by default). A line with an option
@@ -310,10 +311,6 @@ public class AuthorizedKeysAuthenticator extends BaseObject implements IPublicKe
 			options = line.substring(0, end);
 			rest = line.substring(end).trim();
 		}
-		String type = rest.split("\\s+", 2)[0];
-		if( type.startsWith("sk-") ) {
-			throw new SshException("security keys (sk-*) are not supported");
-		}
 		byte[] blob = SshPublicKeys.encode(SshPublicKeys.fromOpenSsh(rest));
 
 		String forced = null;
@@ -324,6 +321,8 @@ public class AuthorizedKeysAuthenticator extends BaseObject implements IPublicKe
 		String from = null;
 		long expiry = 0;
 		boolean ca = false;
+		boolean touch = true;
+		boolean verify = false;
 		if( options != null ) {
 			for (String[] o : splitOptions(options)) {
 				String name = o[0].toLowerCase(java.util.Locale.ROOT);
@@ -357,6 +356,9 @@ public class AuthorizedKeysAuthenticator extends BaseObject implements IPublicKe
 					permitListen.add(need(name, value));
 					break;
 				case "expiry-time": expiry = expiry(need(name, value)); break;
+				// Security keys (sk-*): touching the key is not needed / a PIN is
+				case "no-touch-required": touch = false; break;
+				case "verify-required": verify = true; break;
 				// PermitUserEnvironment and tunnel devices aren't supported: nothing to allow
 				case "environment":
 				case "tunnel":
@@ -370,7 +372,7 @@ public class AuthorizedKeysAuthenticator extends BaseObject implements IPublicKe
 			throw new IllegalArgumentException("principals= without cert-authority");
 		}
 		return new Entry(blob, ca, principals, from, expiry,
-				new KeyRestrictions(forced, pty, ports, agent, x11, rc, permitOpen, permitListen));
+				new KeyRestrictions(forced, pty, ports, agent, x11, rc, permitOpen, permitListen).withSecurityKey(touch, verify));
 	}
 
 	private static String need(String name, String value) {

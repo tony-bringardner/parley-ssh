@@ -67,7 +67,8 @@ import us.bringardner.parley.ssh.algorithms.SshPublicKeys;
  */
 public class UserCertificateAuthenticator extends BaseObject implements IPublicKeyAuthenticator {
 
-	private static final List<String> KNOWN_CRITICAL = Arrays.asList(SshCertificate.FORCE_COMMAND, SshCertificate.SOURCE_ADDRESS);
+	private static final List<String> KNOWN_CRITICAL = Arrays.asList(SshCertificate.FORCE_COMMAND, SshCertificate.SOURCE_ADDRESS,
+			SshCertificate.VERIFY_REQUIRED);
 
 	private final List<byte[]> cas;
 	private volatile Function<String, Collection<String>> principals = Collections::singletonList;

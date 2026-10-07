@@ -70,6 +70,9 @@ public final class SshPublicKeys {
 	 * @throws IllegalArgumentException for an unsupported key
 	 */
 	public static String keyType(PublicKey key) {
+		if( key instanceof SkPublicKey ) {
+			return ((SkPublicKey) key).getType();
+		}
 		if( Ed25519.isEd25519(key) ) {
 			return Ed25519.SSH_ED25519;
 		}
@@ -87,6 +90,21 @@ public final class SshPublicKeys {
 	 */
 	public static byte[] encode(PublicKey key) {
 		SshBuffer b = new SshBuffer();
+		if( key instanceof SkPublicKey ) {
+			// The key's own blob without its type, then the application (PROTOCOL.u2f)
+			SkPublicKey sk = (SkPublicKey) key;
+			byte[] inner = encode(sk.getKey());
+			SshBuffer ib = new SshBuffer(inner);
+			try {
+				ib.getString();
+			} catch (SshException e) {
+				throw new IllegalStateException(e);
+			}
+			b.putString(sk.getType());
+			b.putRaw(java.util.Arrays.copyOfRange(inner, ib.readPosition(), inner.length));
+			b.putString(sk.getApplication());
+			return b.toByteArray();
+		}
 		if( Ed25519.isEd25519(key) ) {
 			b.putString(Ed25519.SSH_ED25519);
 			b.putString(Ed25519.publicBytes(key));
@@ -117,7 +135,21 @@ public final class SshPublicKeys {
 		String type = b.getStringUtf8();
 		try {
 			PublicKey ret;
-			if( SSH_RSA.equals(type) ) {
+			if( SkPublicKey.SK_ECDSA.equals(type) ) {
+				String curve = b.getStringUtf8();
+				if( !"nistp256".equals(curve) ) {
+					throw new SshException(type+" with curve "+curve);
+				}
+				ECParameterSpec params = curveParams(curve);
+				PublicKey ec = KeyFactory.getInstance("EC").generatePublic(new ECPublicKeySpec(decodePoint(b.getString(), params), params));
+				ret = new SkPublicKey(ec, b.getStringUtf8());
+			} else if( SkPublicKey.SK_ED25519.equals(type) ) {
+				if( !Ed25519.isSupported() ) {
+					throw new SshException(type+" keys need Java 15 or later");
+				}
+				PublicKey ed = Ed25519.publicKey(b.getString());
+				ret = new SkPublicKey(ed, b.getStringUtf8());
+			} else if( SSH_RSA.equals(type) ) {
 				BigInteger e = b.getMpint();
 				BigInteger n = b.getMpint();
 				if( e.signum() <= 0 || n.signum() <= 0 ) {
