@@ -60,6 +60,28 @@ public interface ISshCipher {
 		return getTagSize() > 0;
 	}
 
+	/**
+	 * @return true if an AEAD cipher also encrypts the packet length (chacha20-poly1305), 
+	 * false if the length is sent in clear (aes-gcm)
+	 */
+	default boolean isLengthEncrypted() {
+		return false;
+	}
+
+	/**
+	 * The sequence number of the packet about to be encrypted or decrypted (chacha20-poly1305's nonce).
+	 */
+	default void setSequence(long sequence) {
+	}
+
+	/**
+	 * Length encrypting AEAD ciphers: the packet length from its 4 encrypted bytes, without 
+	 * changing them (the tag covers them as they are).
+	 */
+	default int decryptLength(byte[] buf, int off) throws GeneralSecurityException {
+		throw new UnsupportedOperationException(getName()+" doesn't encrypt the length");
+	}
+
 	void init(boolean encrypt, byte[] key, byte[] iv) throws GeneralSecurityException;
 
 	/**

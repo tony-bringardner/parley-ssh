@@ -34,6 +34,7 @@ public class OpenSshClientIT {
 
 	private static SshServer server;
 	private static File key;
+	private static File edKey;
 	private static File sftpRoot;
 
 	private static boolean have(String program) {
@@ -54,8 +55,15 @@ public class OpenSshClientIT {
 		Assumptions.assumeTrue(kg.waitFor(30, TimeUnit.SECONDS) && kg.exitValue() == 0, "no ssh-keygen");
 		server = new SshServer(0);
 		server.setHostKeyProvider(HostKeyProviders.ephemeral());
-		server.setPublicKeyAuthenticator(AuthorizedKeysAuthenticator.forFile(new File(key.getPath()+".pub")));
+		edKey = new File(dir, "id_ed25519");
+		Process kg2 = new ProcessBuilder("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", edKey.getPath()).redirectErrorStream(true).start();
+		kg2.waitFor(30, TimeUnit.SECONDS);
+		File authorized = new File(dir, "authorized_keys");
+		java.nio.file.Files.write(authorized.toPath(), (new String(java.nio.file.Files.readAllBytes(new File(key.getPath()+".pub").toPath()), StandardCharsets.UTF_8)
+				+new String(java.nio.file.Files.readAllBytes(new File(edKey.getPath()+".pub").toPath()), StandardCharsets.UTF_8)).getBytes(StandardCharsets.UTF_8));
+		server.setPublicKeyAuthenticator(AuthorizedKeysAuthenticator.forFile(authorized));
 		server.setCommandFactory((line, env) -> ServerTest.command(line));
+		server.setForwardingFilter(ForwardingFilters.localOnly());
 		sftpRoot = new File(dir, "sftp-root");
 		sftpRoot.mkdirs();
 		server.addSubsystem(us.bringardner.net.ssh.sftp.server.SftpSubsystemFactory.forRoot(
@@ -148,7 +156,7 @@ public class OpenSshClientIT {
 		for (String k : d.getKeyExchangeNames()) {
 			runs.add(new String[] {"KexAlgorithms="+k});
 		}
-		for (String h : new String[] {"ecdsa-sha2-nistp256", "rsa-sha2-512", "rsa-sha2-256"}) {
+		for (String h : new String[] {"ssh-ed25519", "ecdsa-sha2-nistp256", "rsa-sha2-512", "rsa-sha2-256"}) {
 			runs.add(new String[] {"HostKeyAlgorithms="+h});
 		}
 		for (String c : d.getCipherNames()) {
@@ -213,5 +221,104 @@ public class OpenSshClientIT {
 		assertTrue(p.waitFor(60, TimeUnit.SECONDS));
 		assertEquals(0, p.exitValue(), out);
 		assertTrue(!new File(sftpRoot, "docs").exists(), "rm and rmdir");
+	}
+
+	/** An Ed25519 user key (ssh-keygen's default type) */
+	@Test
+	public void ed25519UserKey() throws Exception {
+		File saved = key;
+		key = edKey;
+		try {
+			Result r = ssh(null, "whoami", "PubkeyAcceptedAlgorithms=ssh-ed25519");
+			assertEquals(0, r.exit, r.err);
+			assertEquals("alice", new String(r.out, StandardCharsets.UTF_8));
+		} finally {
+			key = saved;
+		}
+	}
+
+	/** ssh -C: zlib@openssh.com, compressed after the login */
+	@Test
+	public void compressed() throws Exception {
+		byte[] data = new byte[3*1024*1024];
+		Random r = new Random(17);
+		for (int i = 0; i < data.length; i++) {
+			data[i] = (byte) ('0'+r.nextInt(10));
+		}
+		Result res = ssh(data, "cat", "Compression=yes");
+		assertEquals(0, res.exit, res.err);
+		assertArrayEquals(data, res.out);
+	}
+
+	private static int freePort() throws Exception {
+		try (java.net.ServerSocket ss = new java.net.ServerSocket(0)) {
+			return ss.getLocalPort();
+		}
+	}
+
+	private static void waitForPort(int port) throws Exception {
+		long end = System.currentTimeMillis()+15000;
+		while( true ) {
+			try (java.net.Socket s = new java.net.Socket("localhost", port)) {
+				return;
+			} catch (java.io.IOException e) {
+				if( System.currentTimeMillis() > end ) {
+					throw new AssertionError("nothing listens on "+port);
+				}
+				Thread.sleep(100);
+			}
+		}
+	}
+
+	/** ssh -L and ssh -R through the server */
+	@Test
+	public void portForwarding() throws Exception {
+		java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newCachedThreadPool();
+		java.net.ServerSocket echo = ForwardingTest.echoServer(pool);
+		List<String> base = new ArrayList<String>(Arrays.asList("ssh", "-F", "/dev/null", "-p", ""+server.getLocalPort(),
+				"-i", key.getPath(), "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none", "-o", "BatchMode=yes",
+				"-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR",
+				"-o", "ExitOnForwardFailure=yes", "-N"));
+		try {
+			int local = freePort();
+			List<String> l = new ArrayList<String>(base);
+			l.addAll(Arrays.asList("-L", local+":127.0.0.1:"+echo.getLocalPort(), "alice@127.0.0.1"));
+			Process pl = new ProcessBuilder(l).redirectErrorStream(true).start();
+			try {
+				waitForPort(local);
+				assertTrue(ForwardingTest.roundTrip("localhost", local, 2*1024*1024, 1, pool), "ssh -L");
+			} finally {
+				pl.destroy();
+			}
+
+			int remote = freePort();
+			List<String> r = new ArrayList<String>(base);
+			r.addAll(Arrays.asList("-R", "localhost:"+remote+":127.0.0.1:"+echo.getLocalPort(), "alice@127.0.0.1"));
+			Process pr = new ProcessBuilder(r).redirectErrorStream(true).start();
+			try {
+				waitForPort(remote);
+				assertTrue(ForwardingTest.roundTrip("localhost", remote, 2*1024*1024, 2, pool), "ssh -R");
+			} finally {
+				pr.destroy();
+			}
+
+			// Outside the filter: ssh -L to another host is refused when used
+			int bad = freePort();
+			List<String> b = new ArrayList<String>(base);
+			b.addAll(Arrays.asList("-L", bad+":192.0.2.1:80", "alice@127.0.0.1"));
+			Process pb = new ProcessBuilder(b).redirectErrorStream(true).start();
+			try {
+				waitForPort(bad);
+				try (java.net.Socket sock = new java.net.Socket("localhost", bad)) {
+					sock.setSoTimeout(10000);
+					assertEquals(-1, sock.getInputStream().read(), "refused by the server: closed at once");
+				}
+			} finally {
+				pb.destroy();
+			}
+		} finally {
+			echo.close();
+			pool.shutdownNow();
+		}
 	}
 }

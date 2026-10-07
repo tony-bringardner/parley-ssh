@@ -89,10 +89,14 @@ public final class HostKeyProviders {
 	public static IHostKeyProvider generated(File dir) {
 		return () -> {
 			List<KeyPair> ret = new ArrayList<KeyPair>();
-			for (String name : new String[] {"ssh_host_ecdsa_key", "ssh_host_rsa_key"}) {
+			List<String> names = new ArrayList<String>(Arrays.asList("ssh_host_ecdsa_key", "ssh_host_rsa_key"));
+			if( us.bringardner.net.ssh.algorithms.Ed25519.isSupported() ) {
+				names.add(0, "ssh_host_ed25519_key");
+			}
+			for (String name : names) {
 				File f = new File(dir, name);
 				if( !f.exists() ) {
-					KeyPair kp = name.contains("ecdsa") ? ec() : rsa();
+					KeyPair kp = name.contains("ed25519") ? ed25519() : name.contains("ecdsa") ? ec() : rsa();
 					SshKeyWriter.write(kp, f, "BjlSsh host key");
 				}
 				ret.add(SshKeyLoader.load(f, null));
@@ -108,7 +112,11 @@ public final class HostKeyProviders {
 	public static IHostKeyProvider ephemeral() {
 		List<KeyPair> keys;
 		try {
-			keys = Collections.unmodifiableList(Arrays.asList(ec(), rsa()));
+			List<KeyPair> tmp = new ArrayList<KeyPair>(Arrays.asList(ec(), rsa()));
+			if( us.bringardner.net.ssh.algorithms.Ed25519.isSupported() ) {
+				tmp.add(0, ed25519());
+			}
+			keys = Collections.unmodifiableList(tmp);
 		} catch (IOException e) {
 			throw new IllegalStateException(e);
 		}
@@ -128,6 +136,14 @@ public final class HostKeyProviders {
 			KeyPairGenerator g = KeyPairGenerator.getInstance("EC");
 			g.initialize(new ECGenParameterSpec("secp256r1"));
 			return g.generateKeyPair();
+		} catch (GeneralSecurityException e) {
+			throw new IOException(e);
+		}
+	}
+
+	private static KeyPair ed25519() throws IOException {
+		try {
+			return us.bringardner.net.ssh.algorithms.Ed25519.generate();
 		} catch (GeneralSecurityException e) {
 			throw new IOException(e);
 		}

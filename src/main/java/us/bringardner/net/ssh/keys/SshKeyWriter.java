@@ -37,9 +37,11 @@ import java.security.SecureRandom;
 import java.security.interfaces.ECPrivateKey;
 import java.security.interfaces.ECPublicKey;
 import java.security.interfaces.RSAPrivateCrtKey;
+import java.util.Arrays;
 import java.util.Base64;
 
 import us.bringardner.net.ssh.SshBuffer;
+import us.bringardner.net.ssh.algorithms.Ed25519;
 import us.bringardner.net.ssh.algorithms.SshPublicKeys;
 
 /**
@@ -70,7 +72,12 @@ public final class SshKeyWriter {
 		SshBuffer priv = new SshBuffer();
 		int check = new SecureRandom().nextInt();
 		priv.putInt(check).putInt(check);
-		if( pair.getPrivate() instanceof RSAPrivateCrtKey ) {
+		if( Ed25519.isEd25519(pair.getPublic()) ) {
+			byte[] pub = Ed25519.publicBytes(pair.getPublic());
+			byte[] full = Arrays.copyOf(Ed25519.seed(pair.getPrivate()), 64);
+			System.arraycopy(pub, 0, full, 32, 32);
+			priv.putString(Ed25519.SSH_ED25519).putString(pub).putString(full);
+		} else if( pair.getPrivate() instanceof RSAPrivateCrtKey ) {
 			RSAPrivateCrtKey k = (RSAPrivateCrtKey) pair.getPrivate();
 			priv.putString(SshPublicKeys.SSH_RSA).putMpint(k.getModulus()).putMpint(k.getPublicExponent())
 					.putMpint(k.getPrivateExponent()).putMpint(k.getCrtCoefficient()).putMpint(k.getPrimeP()).putMpint(k.getPrimeQ());
@@ -101,7 +108,8 @@ public final class SshKeyWriter {
 	 * file.pub with the public key.
 	 */
 	public static void write(KeyPair pair, File file, String comment) throws IOException {
-		write(pair, file, comment, false);
+		// PKCS#8 has no room for an Ed25519 public key: OpenSSH's format for those
+		write(pair, file, comment, Ed25519.isEd25519(pair.getPublic()));
 	}
 
 	/**

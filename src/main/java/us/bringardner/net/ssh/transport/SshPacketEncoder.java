@@ -47,6 +47,7 @@ public class SshPacketEncoder {
 	private final SecureRandom random;
 	private ISshCipher cipher;
 	private ISshMac mac;
+	private us.bringardner.net.ssh.algorithms.ZlibCompression compression;
 	private long sequence;
 	private volatile long bytesSinceKeys;
 	private volatile long packetsSinceKeys;
@@ -63,6 +64,17 @@ public class SshPacketEncoder {
 		this.mac = mac;
 		bytesSinceKeys = 0;
 		packetsSinceKeys = 0;
+	}
+
+	/**
+	 * Compress every payload from the next packet on.
+	 */
+	public void setCompression(us.bringardner.net.ssh.algorithms.ZlibCompression compression) {
+		this.compression = compression;
+	}
+
+	public boolean isCompressing() {
+		return compression != null;
 	}
 
 	/**
@@ -89,6 +101,9 @@ public class SshPacketEncoder {
 	 * @return the packet to write
 	 */
 	public ByteBuffer encode(SshBuffer payload) throws GeneralSecurityException {
+		if( compression != null ) {
+			payload = new SshBuffer(compression.compress(payload.array(), payload.readPosition(), payload.available()));
+		}
 		int payloadLength = payload.available();
 		boolean aead = cipher != null && cipher.isAead();
 		boolean etm = !aead && mac != null && mac.isEncryptThenMac();
@@ -114,6 +129,7 @@ public class SshPacketEncoder {
 		System.arraycopy(pad, 0, packet, 5+payloadLength, padding);
 
 		if( aead ) {
+			cipher.setSequence(sequence);
 			cipher.encryptAead(packet, 0, 4, 4, length);
 		} else if( etm ) {
 			if( cipher != null ) {

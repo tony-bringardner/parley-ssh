@@ -75,6 +75,9 @@ public class ClientSession extends SshTransport {
 	private volatile long authTimeout = 60000;
 	// connection protocol
 	private final ConnectionService connection = new ConnectionService(this);
+	private volatile java.util.concurrent.Executor executor = java.util.concurrent.ForkJoinPool.commonPool();
+	// ssh -R: the server's bound port to the local target "host:port"
+	private final java.util.Map<Integer, String> remoteTargets = new java.util.concurrent.ConcurrentHashMap<Integer, String>();
 	private volatile long channelTimeout = 30000;
 	private volatile int maxKeepAliveFailures = 3;
 	private final java.util.concurrent.atomic.AtomicInteger unansweredKeepAlives = new java.util.concurrent.atomic.AtomicInteger();
@@ -84,6 +87,134 @@ public class ClientSession extends SshTransport {
 		this.host = host;
 		this.port = port;
 		this.verifier = verifier;
+		connection.addChannelFactory(us.bringardner.net.ssh.connection.ForwardingChannel.FORWARDED, (type, data) -> forwarded(data));
+	}
+
+	/**
+	 * @param executor runs the copying of forwarded connections (the client's pool)
+	 */
+	void setExecutor(java.util.concurrent.Executor executor) {
+		this.executor = executor;
+	}
+
+	// ------------------------------------------------------------------ port forwarding
+
+	/**
+	 * Ask the server to connect to host:port and carry the connection over a channel 
+	 * (the channel's streams are the connection).
+	 */
+	public us.bringardner.net.ssh.connection.ForwardingChannel openDirectTcpip(String host, int port) throws IOException {
+		return openChannel(new us.bringardner.net.ssh.connection.ForwardingChannel(
+				us.bringardner.net.ssh.connection.ForwardingChannel.DIRECT, host, port, "127.0.0.1", 0));
+	}
+
+	/**
+	 * ssh -L: listen on bindHost:bindPort here, and send each connection to host:port as the 
+	 * server sees it.
+	 * 
+	 * @param bindHost e.g. "localhost" (only this machine can use it)
+	 * @param bindPort 0 for any free port (see getBoundPort)
+	 */
+	public PortForwarder startLocalForwarding(String bindHost, int bindPort, String host, int port) throws IOException {
+		java.net.ServerSocket ss = new java.net.ServerSocket();
+		ss.setReuseAddress(true);
+		ss.bind(new java.net.InetSocketAddress(bindHost, bindPort));
+		executor.execute(() -> {
+			while( !ss.isClosed() ) {
+				java.net.Socket s;
+				try {
+					s = ss.accept();
+				} catch (IOException e) {
+					break;
+				}
+				executor.execute(() -> {
+					try {
+						us.bringardner.net.ssh.connection.ForwardingChannel ch = openChannel(new us.bringardner.net.ssh.connection.ForwardingChannel(
+								us.bringardner.net.ssh.connection.ForwardingChannel.DIRECT, host, port,
+								s.getInetAddress().getHostAddress(), s.getPort()));
+						ch.bridge(s, executor);
+					} catch (IOException | RuntimeException e) {
+						logDebug("Forwarding to "+host+":"+port+" refused: "+e.getMessage());
+						us.bringardner.io.IoUtils.closeQuietly(s);
+					}
+				});
+			}
+		});
+		return new PortForwarder() {
+			@Override
+			public int getBoundPort() {
+				return ss.getLocalPort();
+			}
+
+			@Override
+			public void close() {
+				us.bringardner.io.IoUtils.closeQuietly(ss);
+			}
+		};
+	}
+
+	/**
+	 * ssh -R: ask the server to listen on bindHost:bindPort and send each connection back 
+	 * here, to localHost:localPort.
+	 * 
+	 * @param bindHost on the server, e.g. "localhost"
+	 * @param bindPort 0 for any free port (the server's choice, see getBoundPort)
+	 * @throws IOException if the server refuses
+	 */
+	public PortForwarder startRemoteForwarding(String bindHost, int bindPort, String localHost, int localPort) throws IOException {
+		SshBuffer reply = await(connection.sendGlobalRequest("tcpip-forward", true, new SshBuffer().putString(bindHost).putInt(bindPort)),
+				channelTimeout, "tcpip-forward");
+		if( reply == null ) {
+			throw new SshException(SshConstants.SSH_DISCONNECT_BY_APPLICATION, "The server refused to listen on "+bindHost+":"+bindPort);
+		}
+		int bound = bindPort == 0 ? reply.getInt() : bindPort;
+		remoteTargets.put(bound, localHost+":"+localPort);
+		return new PortForwarder() {
+			@Override
+			public int getBoundPort() {
+				return bound;
+			}
+
+			@Override
+			public void close() {
+				remoteTargets.remove(bound);
+				if( isOpen() ) {
+					connection.sendGlobalRequest("cancel-tcpip-forward", true, new SshBuffer().putString(bindHost).putInt(bound));
+				}
+			}
+		};
+	}
+
+	/**
+	 * The server reports a connection to a port it listens on for us (ssh -R).
+	 */
+	private us.bringardner.net.ssh.connection.ForwardingChannel forwarded(SshBuffer data) throws IOException {
+		String bindHost = data.getStringUtf8();
+		int bound = data.getInt();
+		String originHost = data.getStringUtf8();
+		int originPort = data.getInt();
+		String target = remoteTargets.get(bound);
+		if( target == null ) {
+			// Nothing asked for it: refused
+			return null;
+		}
+		int i = target.lastIndexOf(':');
+		String host = target.substring(0, i);
+		int port = Integer.parseInt(target.substring(i+1));
+		us.bringardner.net.ssh.connection.ForwardingChannel ch = new us.bringardner.net.ssh.connection.ForwardingChannel(
+				us.bringardner.net.ssh.connection.ForwardingChannel.FORWARDED, bindHost, bound, originHost, originPort);
+		ch.setOnOpen(() -> executor.execute(() -> {
+			java.net.Socket s = new java.net.Socket();
+			try {
+				s.connect(new java.net.InetSocketAddress(host, port), 10000);
+				ch.bridge(s, executor);
+			} catch (IOException e) {
+				logDebug("Can't connect to "+target+": "+e.getMessage());
+				us.bringardner.io.IoUtils.closeQuietly(s);
+				ch.close();
+			}
+		}));
+		return ch;
 	}
 
 	/**
@@ -281,6 +412,7 @@ public class ClientSession extends SshTransport {
 		}
 		switch (msg) {
 		case SshConstants.SSH_MSG_USERAUTH_SUCCESS:
+			startDelayedCompression();
 			a.onSuccess();
 			return true;
 		case SshConstants.SSH_MSG_USERAUTH_FAILURE:

@@ -128,10 +128,14 @@ public class ThirdPartyClientsTest {
 		for (String k : d.getKeyExchangeNames()) {
 			runs.add(new String[] {"kex", k});
 		}
-		for (String h : new String[] {"ecdsa-sha2-nistp256", "rsa-sha2-512", "rsa-sha2-256"}) {
+		for (String h : new String[] {"ssh-ed25519", "ecdsa-sha2-nistp256", "rsa-sha2-512", "rsa-sha2-256"}) {
 			runs.add(new String[] {"server_host_key", h});
 		}
 		for (String c : d.getCipherNames()) {
+			if( c.startsWith("chacha20") ) {
+				// JSch needs Bouncy Castle for it; OpenSSH and MINA cover it
+				continue;
+			}
 			runs.add(new String[] {"cipher.c2s", c, "cipher.s2c", c});
 		}
 		for (String m : d.getMacNames()) {

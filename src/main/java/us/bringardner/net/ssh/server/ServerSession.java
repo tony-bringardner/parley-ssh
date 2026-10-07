@@ -59,6 +59,7 @@ public class ServerSession extends SshTransport {
 
 	private final SshServer server;
 	private final ConnectionService connection;
+	private final ServerForwarding forwarding;
 	private final Map<String, Object> attributes = new ConcurrentHashMap<String, Object>();
 	private volatile boolean authenticated;
 	private volatile String user;
@@ -110,6 +111,7 @@ public class ServerSession extends SshTransport {
 		this.connection = new ConnectionService(this);
 		connection.addChannelFactory("session", (type, data) -> new ServerSessionChannel(this));
 		connection.setMaxChannels(server.getMaxChannelsPerSession());
+		forwarding = new ServerForwarding(this);
 	}
 
 	public SshServer getServer() {
@@ -233,6 +235,7 @@ public class ServerSession extends SshTransport {
 			t.cancel(false);
 		}
 		connection.closeAll(reason);
+		forwarding.close();
 	}
 
 	// ------------------------------------------------------------------ messages
@@ -318,6 +321,7 @@ public class ServerSession extends SshTransport {
 			}
 			logInfo("User "+name+" logged in with "+m.getName()+" from "+getConnection().getRemoteAddress());
 			send(SshBuffer.message(SshConstants.SSH_MSG_USERAUTH_SUCCESS));
+			startDelayedCompression();
 		} else {
 			failed(name);
 		}

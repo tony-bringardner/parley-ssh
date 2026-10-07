@@ -57,6 +57,7 @@ public class SshPacketDecoder implements IFrameDecoder {
 	private final int maxPacket;
 	private ISshCipher cipher;
 	private ISshMac mac;
+	private us.bringardner.net.ssh.algorithms.ZlibCompression compression;
 	private long sequence;
 	// The first block of a packet, decrypted (layout 1 only), and its packet_length
 	private byte[] first;
@@ -86,6 +87,17 @@ public class SshPacketDecoder implements IFrameDecoder {
 		this.mac = mac;
 		bytesSinceKeys = 0;
 		packetsSinceKeys = 0;
+	}
+
+	/**
+	 * Decompress every payload from the next packet on.
+	 */
+	public void setCompression(us.bringardner.net.ssh.algorithms.ZlibCompression compression) {
+		this.compression = compression;
+	}
+
+	public boolean isCompressing() {
+		return compression != null;
 	}
 
 	/**
@@ -192,7 +204,15 @@ public class SshPacketDecoder implements IFrameDecoder {
 			return null;
 		}
 		int pos = in.position();
-		long len = in.getInt(pos) & 0xffffffffL;
+		long len;
+		if( aead && cipher.isLengthEncrypted() ) {
+			byte[] head = new byte[4];
+			in.duplicate().get(head);
+			cipher.setSequence(sequence);
+			len = cipher.decryptLength(head, 0) & 0xffffffffL;
+		} else {
+			len = in.getInt(pos) & 0xffffffffL;
+		}
 		checkLength(len, false);
 		int tail = aead ? cipher.getTagSize() : mac.getMacSize();
 		if( in.remaining() < 4+len+tail ) {
@@ -201,6 +221,7 @@ public class SshPacketDecoder implements IFrameDecoder {
 		byte[] packet = new byte[4+(int) len+tail];
 		in.get(packet);
 		if( aead ) {
+			cipher.setSequence(sequence);
 			cipher.decryptAead(packet, 0, 4, 4, (int) len);
 		} else {
 			byte[] want = mac.compute(sequence, packet, 0, 4+(int) len);
@@ -233,6 +254,9 @@ public class SshPacketDecoder implements IFrameDecoder {
 		sequence = (sequence+1) & 0xffffffffL;
 		bytesSinceKeys += 4+len+macSize;
 		packetsSinceKeys++;
+		if( compression != null ) {
+			return ByteBuffer.wrap(compression.decompress(packet, off+1, payloadLength, maxPacket));
+		}
 		return ByteBuffer.wrap(packet, off+1, payloadLength).slice();
 	}
 }

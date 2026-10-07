@@ -51,7 +51,7 @@ import us.bringardner.net.ssh.SshException;
  * exchange and in public key authentication, and the "type base64 comment" text of
  * known_hosts and authorized_keys files. Also SHA256 fingerprints as OpenSSH shows them.
  * <p>
- * Supports ssh-rsa and ecdsa-sha2-nistp256/384/521.
+ * Supports ssh-rsa, ecdsa-sha2-nistp256/384/521 and (Java 15+) ssh-ed25519.
  *
  * @author Tony Bringardner
  */
@@ -70,6 +70,9 @@ public final class SshPublicKeys {
 	 * @throws IllegalArgumentException for an unsupported key
 	 */
 	public static String keyType(PublicKey key) {
+		if( Ed25519.isEd25519(key) ) {
+			return Ed25519.SSH_ED25519;
+		}
 		if( key instanceof RSAPublicKey ) {
 			return SSH_RSA;
 		}
@@ -84,7 +87,10 @@ public final class SshPublicKeys {
 	 */
 	public static byte[] encode(PublicKey key) {
 		SshBuffer b = new SshBuffer();
-		if( key instanceof RSAPublicKey ) {
+		if( Ed25519.isEd25519(key) ) {
+			b.putString(Ed25519.SSH_ED25519);
+			b.putString(Ed25519.publicBytes(key));
+		} else if( key instanceof RSAPublicKey ) {
 			RSAPublicKey rsa = (RSAPublicKey) key;
 			b.putString(SSH_RSA);
 			b.putMpint(rsa.getPublicExponent());
@@ -118,6 +124,11 @@ public final class SshPublicKeys {
 					throw new SshException("Invalid RSA key");
 				}
 				ret = KeyFactory.getInstance("RSA").generatePublic(new RSAPublicKeySpec(n, e));
+			} else if( Ed25519.SSH_ED25519.equals(type) ) {
+				if( !Ed25519.isSupported() ) {
+					throw new SshException("ssh-ed25519 keys need Java 15 or later");
+				}
+				ret = Ed25519.publicKey(b.getString());
 			} else if( type.startsWith("ecdsa-sha2-") ) {
 				String curve = b.getStringUtf8();
 				if( !type.equals("ecdsa-sha2-"+curve) ) {

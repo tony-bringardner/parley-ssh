@@ -42,6 +42,7 @@ public class PacketCodecTest {
 			{"aes256-ctr", "hmac-sha2-512-etm@openssh.com"},
 			{"aes128-gcm@openssh.com", null},
 			{"aes256-gcm@openssh.com", null},
+			{"chacha20-poly1305@openssh.com", null},
 	};
 
 	private ISshCipher[] ciphers(String name) throws Exception {
@@ -174,5 +175,59 @@ public class PacketCodecTest {
 			BigInteger p = ((DHPublicKey) g.generateKeyPair().getPublic()).getParams().getP();
 			assertEquals(p, bits == 2048 ? DhAgreement.GROUP14 : DhAgreement.GROUP16, bits+" bit group");
 		}
+	}
+
+	/** RFC 8439 2.5.2 */
+	@Test
+	public void poly1305RfcVector() {
+		byte[] key = hex("85d6be7857556d337f4452fe42d506a80103808afb0db2fd4abff6af4149f51b");
+		byte[] msg = "Cryptographic Forum Research Group".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+		assertArrayEquals(hex("a8061dc1305136c6c22b8baf0c0127a9"), us.bringardner.net.ssh.algorithms.Poly1305.mac(key, msg, 0, msg.length));
+		// and every length around block boundaries against a second, slow implementation
+		java.util.Random r = new java.util.Random(1);
+		for (int len = 0; len < 70; len++) {
+			byte[] k = new byte[32];
+			byte[] m = new byte[len];
+			r.nextBytes(k);
+			r.nextBytes(m);
+			assertArrayEquals(slowPoly(k, m), us.bringardner.net.ssh.algorithms.Poly1305.mac(k, m, 0, len), "length "+len);
+		}
+	}
+
+	/** Poly1305 with BigInteger, straight from RFC 8439 2.5.1 */
+	private static byte[] slowPoly(byte[] key, byte[] m) {
+		byte[] rb = java.util.Arrays.copyOf(key, 16);
+		rb[3] &= 15; rb[7] &= 15; rb[11] &= 15; rb[15] &= 15; rb[4] &= (byte) 252; rb[8] &= (byte) 252; rb[12] &= (byte) 252;
+		BigInteger r = le(rb);
+		BigInteger s = le(java.util.Arrays.copyOfRange(key, 16, 32));
+		BigInteger p = BigInteger.ONE.shiftLeft(130).subtract(BigInteger.valueOf(5));
+		BigInteger acc = BigInteger.ZERO;
+		for (int i = 0; i < m.length; i += 16) {
+			byte[] block = java.util.Arrays.copyOfRange(m, i, Math.min(m.length, i+16));
+			BigInteger n = le(block).add(BigInteger.ONE.shiftLeft(8*block.length));
+			acc = acc.add(n).multiply(r).mod(p);
+		}
+		acc = acc.add(s);
+		byte[] out = new byte[16];
+		for (int i = 0; i < 16; i++) {
+			out[i] = acc.shiftRight(8*i).byteValue();
+		}
+		return out;
+	}
+
+	private static BigInteger le(byte[] b) {
+		byte[] be = new byte[b.length];
+		for (int i = 0; i < b.length; i++) {
+			be[i] = b[b.length-1-i];
+		}
+		return new BigInteger(1, be);
+	}
+
+	private static byte[] hex(String s) {
+		byte[] ret = new byte[s.length()/2];
+		for (int i = 0; i < ret.length; i++) {
+			ret[i] = (byte) Integer.parseInt(s.substring(2*i, 2*i+2), 16);
+		}
+		return ret;
 	}
 }

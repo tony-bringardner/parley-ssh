@@ -125,7 +125,9 @@ public class SshClient extends BaseObject implements Closeable {
 				throw new IllegalStateException("Can't read ~/.ssh/known_hosts: "+e.getMessage(), e);
 			}
 		}
-		return new ClientSession(host, port, v, algorithms, version, random);
+		ClientSession s = new ClientSession(host, port, v, algorithms, version, random);
+		s.setExecutor(executor);
+		return s;
 	}
 
 	/**

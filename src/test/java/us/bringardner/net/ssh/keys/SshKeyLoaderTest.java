@@ -70,6 +70,7 @@ public class SshKeyLoaderTest {
 		assertArrayEquals(SshPublicKeys.encode(pub), SshPublicKeys.encode(kp.getPublic()), f.getName()+": public key");
 		String type = SshPublicKeys.keyType(pub);
 		ISignatureAlgorithm sig = SshAlgorithms.findSignature(type.equals("ssh-rsa") ? "rsa-sha2-256" : type);
+		assertTrue(sig != null, type);
 		byte[] data = "to be signed".getBytes(StandardCharsets.UTF_8);
 		assertTrue(sig.verify(pub, data, sig.sign(kp.getPrivate(), data)), f.getName()+": signature");
 	}
@@ -78,6 +79,7 @@ public class SshKeyLoaderTest {
 	public void everyFormatSshKeygenWrites() throws Exception {
 		Assumptions.assumeTrue(haveKeygen(), "ssh-keygen not found");
 		String[][] keys = {
+				{"-t", "ed25519"},
 				{"-t", "rsa", "-b", "2048"},
 				{"-t", "ecdsa", "-b", "256"},
 				{"-t", "ecdsa", "-b", "384"},
@@ -85,7 +87,9 @@ public class SshKeyLoaderTest {
 		};
 		int n = 0;
 		for (String[] k : keys) {
-			for (String format : new String[] {null, "PEM", "PKCS8"}) {
+			// ssh-keygen writes Ed25519 keys only in its own format
+			boolean ed = k[1].equals("ed25519");
+			for (String format : ed ? new String[] {null} : new String[] {null, "PEM", "PKCS8"}) {
 				String name = "key"+(n++);
 				List<String> args = new ArrayList<String>(java.util.Arrays.asList(k));
 				if( format != null ) {
@@ -99,15 +103,13 @@ public class SshKeyLoaderTest {
 				File enc = keygen(name+"e", "pass phrase", args.toArray(new String[0]));
 				String text = new String(Files.readAllBytes(enc.toPath()), StandardCharsets.US_ASCII);
 				assertTrue(SshKeyLoader.isEncrypted(text), name+" "+format);
+				// OpenSSH's own format is encrypted with bcrypt_pbkdf and aes256-ctr
+				check(enc, SshKeyLoader.load(enc, "pass phrase".toCharArray()));
+				SshException wrong = assertThrows(SshException.class, () -> SshKeyLoader.load(enc, "wrong".toCharArray()));
 				if( format == null ) {
-					// OpenSSH's own encryption needs bcrypt-pbkdf: a clear message for now
-					SshException e = assertThrows(SshException.class, () -> SshKeyLoader.load(enc, "pass phrase".toCharArray()));
-					assertTrue(e.getMessage().contains("ssh-keygen -p -m PEM"), e.getMessage());
-				} else {
-					check(enc, SshKeyLoader.load(enc, "pass phrase".toCharArray()));
-					assertThrows(SshException.class, () -> SshKeyLoader.load(enc, "wrong".toCharArray()));
-					assertThrows(SshException.class, () -> SshKeyLoader.load(enc, null));
+					assertEquals("Wrong passphrase", wrong.getMessage());
 				}
+				assertThrows(SshException.class, () -> SshKeyLoader.load(enc, null));
 			}
 		}
 	}
@@ -143,10 +145,12 @@ public class SshKeyLoaderTest {
 			roundTrip(eg.generateKeyPair());
 		}
 		roundTrip(rg.generateKeyPair());
+		roundTrip(us.bringardner.net.ssh.algorithms.Ed25519.generate());
 	}
 
 	private void roundTrip(KeyPair kp) throws Exception {
-		for (boolean openSsh : new boolean[] {true, false}) {
+		boolean ed = us.bringardner.net.ssh.algorithms.Ed25519.isEd25519(kp.getPublic());
+		for (boolean openSsh : ed ? new boolean[] {true} : new boolean[] {true, false}) {
 			File f = new File(dir, "w"+System.nanoTime());
 			us.bringardner.net.ssh.keys.SshKeyWriter.write(kp, f, "round trip", openSsh);
 			KeyPair back = SshKeyLoader.load(f, null);
@@ -158,6 +162,16 @@ public class SshKeyLoaderTest {
 				assertEquals(0, p.waitFor(), out);
 				assertEquals(SshPublicKeys.toOpenSsh(kp.getPublic()), out.split(" ")[0]+" "+out.split(" ")[1], (openSsh ? "OpenSSH" : "PKCS#8")+" read by ssh-keygen");
 			}
+		}
+	}
+
+	/** Other ciphers and round counts ssh-keygen can use for its own format */
+	@Test
+	public void openSshKeyCiphers() throws Exception {
+		Assumptions.assumeTrue(haveKeygen(), "ssh-keygen not found");
+		for (String cipher : new String[] {"aes128-ctr", "aes256-cbc"}) {
+			File f = keygen("c-"+cipher, "secret", "-t", "ecdsa", "-Z", cipher, "-a", "4");
+			check(f, SshKeyLoader.load(f, "secret".toCharArray()));
 		}
 	}
 }

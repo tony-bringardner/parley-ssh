@@ -63,6 +63,7 @@ public class SshAlgorithms {
 		kex("diffie-hellman-group14-sha256", "SHA-256", () -> new DhAgreement(DhAgreement.GROUP14, 512));
 		kex("diffie-hellman-group14-sha1", "SHA-1", () -> new DhAgreement(DhAgreement.GROUP14, 512));
 
+		signature(new Ed25519Signature());
 		signature(new EcdsaSignature("nistp256", "SHA256withECDSA"));
 		signature(new EcdsaSignature("nistp384", "SHA384withECDSA"));
 		signature(new EcdsaSignature("nistp521", "SHA512withECDSA"));
@@ -70,6 +71,7 @@ public class SshAlgorithms {
 		signature(new RsaSignature("rsa-sha2-256", "SHA256withRSA"));
 		signature(new RsaSignature("ssh-rsa", "SHA1withRSA"));
 
+		cipher(ChaChaPolyCipher.NAME, ChaChaPolyCipher::new);
 		cipher("aes128-gcm@openssh.com", () -> new AesGcmCipher("aes128-gcm@openssh.com", 16));
 		cipher("aes256-gcm@openssh.com", () -> new AesGcmCipher("aes256-gcm@openssh.com", 32));
 		cipher("aes128-ctr", () -> new AesCtrCipher("aes128-ctr", 16));
@@ -134,7 +136,8 @@ public class SshAlgorithms {
 	private final List<ISignatureAlgorithm> hostKeyAlgorithms = new ArrayList<ISignatureAlgorithm>();
 	private final List<NamedFactory<ISshCipher>> ciphers = new ArrayList<NamedFactory<ISshCipher>>();
 	private final List<NamedFactory<ISshMac>> macs = new ArrayList<NamedFactory<ISshMac>>();
-	private final List<String> compressions = new ArrayList<String>(Collections.singletonList("none"));
+	// "none" first: compression only when a peer prefers it, or after setCompressions(...)
+	private final List<String> compressions = new ArrayList<String>(Arrays.asList("none", ZlibCompression.ZLIB_OPENSSH, ZlibCompression.ZLIB));
 
 	/**
 	 * Empty lists; see {@link #defaults()}.
@@ -153,7 +156,7 @@ public class SshAlgorithms {
 			}
 		}
 		for (ISignatureAlgorithm s : KNOWN_SIGNATURES.values()) {
-			if( !WEAK.contains(s.getName()) ) {
+			if( !WEAK.contains(s.getName()) && s.isSupported() ) {
 				ret.hostKeyAlgorithms.add(s);
 			}
 		}
@@ -224,6 +227,20 @@ public class SshAlgorithms {
 
 	public SshAlgorithms setCiphers(String... names) {
 		replace(ciphers, KNOWN_CIPHERS, names);
+		return this;
+	}
+
+	/**
+	 * @param names e.g. "zlib@openssh.com", "zlib", "none" to ask for compression
+	 */
+	public SshAlgorithms setCompressions(String... names) {
+		for (String n : names) {
+			if( !n.equals("none") && !n.equals(ZlibCompression.ZLIB) && !n.equals(ZlibCompression.ZLIB_OPENSSH) ) {
+				throw new IllegalArgumentException("Unknown compression "+n);
+			}
+		}
+		compressions.clear();
+		compressions.addAll(Arrays.asList(names));
 		return this;
 	}
 

@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.BufferedReader;
 import java.io.File;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
@@ -174,7 +175,7 @@ public class ServerTest {
 		for (String k : d.getKeyExchangeNames()) {
 			runs.add(SshAlgorithms.defaults().setKeyExchanges(k));
 		}
-		for (String h : new String[] {"ecdsa-sha2-nistp256", "rsa-sha2-512", "rsa-sha2-256"}) {
+		for (String h : new String[] {"ssh-ed25519", "ecdsa-sha2-nistp256", "rsa-sha2-512", "rsa-sha2-256"}) {
 			runs.add(SshAlgorithms.defaults().setHostKeyAlgorithms(h));
 		}
 		for (String c : d.getCipherNames()) {
@@ -326,6 +327,55 @@ public class ServerTest {
 		}
 	}
 
+	/** Made by name from the ShellFactory property */
+	public static class PropertyShell implements IShellFactory {
+		@Override
+		public ICommand create(CommandEnvironment env) {
+			return shell();
+		}
+	}
+
+	/** The shell can be configured by class name, with no code */
+	@Test
+	public void shellFactoryFromProperty() throws Exception {
+		String name = "ssh-shell-property-test";
+		System.setProperty(SshServer.class.getName()+"."+SshServer.PROPERTY_SHELL_FACTORY, PropertyShell.class.getName());
+		try {
+			start();
+			server.setShellFactory(null);
+			server.setName(name);
+			server.startAndWait(5000);
+			assertTrue(server.getShellFactory() instanceof PropertyShell);
+			ClientSession s = connect(null);
+			s.authenticateAndWait("alice", new PasswordAuth("secret"));
+			SessionChannel sh = s.openSession();
+			sh.shell();
+			sh.getOutputStream().write("exit\n".getBytes(StandardCharsets.UTF_8));
+			sh.getOutputStream().flush();
+			assertEquals(0, sh.waitForExit(10, TimeUnit.SECONDS));
+			s.close();
+		} finally {
+			System.clearProperty(SshServer.class.getName()+"."+SshServer.PROPERTY_SHELL_FACTORY);
+		}
+	}
+
+	/** A class that can't be made stops the server from starting, not the first login */
+	@Test
+	public void badShellFactoryPropertyStopsStart() throws Exception {
+		String name = "ssh-bad-shell-test";
+		System.setProperty(SshServer.class.getName()+"."+SshServer.PROPERTY_SHELL_FACTORY, "no.such.ShellFactory");
+		try {
+			start();
+			server.setShellFactory(null);
+			server.setName(name);
+			IOException e = assertThrows(IOException.class, () -> server.startAndWait(5000));
+			assertTrue(e.getMessage().contains("no.such.ShellFactory"), e.getMessage());
+			assertEquals(-1, server.getLocalPort());
+		} finally {
+			System.clearProperty(SshServer.class.getName()+"."+SshServer.PROPERTY_SHELL_FACTORY);
+		}
+	}
+
 	@Test
 	public void hostKeysMadeOnceAndKept() throws Exception {
 		File keyDir = new File(dir, "hostkeys");
@@ -338,5 +388,33 @@ public class ServerTest {
 		}
 		java.util.Set<java.nio.file.attribute.PosixFilePermission> perms = Files.getPosixFilePermissions(new File(keyDir, "ssh_host_rsa_key").toPath());
 		assertEquals(java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"), perms);
+	}
+
+	/** zlib@openssh.com starts after the login, zlib at once; data goes through either way */
+	@Test
+	public void compression() throws Exception {
+		start().startAndWait(5000);
+		byte[] data = new byte[2*1024*1024];
+		// compressible: text-like with some randomness
+		Random r = new Random(5);
+		for (int i = 0; i < data.length; i++) {
+			data[i] = (byte) ('a'+r.nextInt(8));
+		}
+		for (String comp : new String[] {"zlib@openssh.com", "zlib"}) {
+			ClientSession s = connect(SshAlgorithms.defaults().setCompressions(comp));
+			assertEquals(comp, s.getNegotiated().getCompressionClientToServer());
+			boolean delayed = comp.equals("zlib@openssh.com");
+			assertEquals(!delayed, s.isCompressing()[0], comp+" before the login");
+			s.authenticateAndWait("alice", new PasswordAuth("secret"));
+			Thread.sleep(50);
+			assertTrue(s.isCompressing()[0] && s.isCompressing()[1], comp+" after the login, both ways");
+			assertArrayEquals(data, s.exec("cat", data, 60000).getStdout(), comp);
+			long wire = s.getConnection().getBytesOut();
+			assertTrue(wire < data.length/2, comp+" compressed: "+wire+" bytes sent for "+data.length);
+			s.rekey().get(10, TimeUnit.SECONDS);
+			assertEquals("still\n", s.exec("echo still", null, 10000).getStdoutText(), "compression goes on after a re-key");
+			s.close();
+			client.close();
+		}
 	}
 }

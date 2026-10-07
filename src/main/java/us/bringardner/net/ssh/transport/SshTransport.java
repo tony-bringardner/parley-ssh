@@ -130,6 +130,11 @@ public abstract class SshTransport extends BaseObject implements INioHandler {
 	// Sequence number our last KEXINIT went out with, to recognize SSH_MSG_UNIMPLEMENTED for it
 	private long kexInitSequence = -1;
 	private final List<SshBuffer> queued = new ArrayList<SshBuffer>();
+	// In the queue: start the delayed compression of the output here
+	private static final SshBuffer START_COMPRESSION = new SshBuffer(new byte[] {0});
+	// zlib@openssh.com negotiated, waiting for the login (per direction)
+	private String delayedOut;
+	private String delayedIn;
 	private final List<CompletableFuture<Void>> kexWaiters = new ArrayList<CompletableFuture<Void>>();
 	private volatile Map<String, byte[]> peerExtensions = Collections.emptyMap();
 	// The peer's first KEXINIT offered ext-info-c / ext-info-s (RFC 8308)
@@ -561,6 +566,14 @@ public abstract class SshTransport extends BaseObject implements INioHandler {
 			}
 			writePacket(SshBuffer.message(SshConstants.SSH_MSG_NEWKEYS));
 			encoder.setKeys(outCipher, outMac);
+			String outComp = client ? n.getCompressionClientToServer() : n.getCompressionServerToClient();
+			if( !encoder.isCompressing() && !"none".equals(outComp) ) {
+				if( us.bringardner.net.ssh.algorithms.ZlibCompression.ZLIB_OPENSSH.equals(outComp) ) {
+					delayedOut = outComp;
+				} else {
+					encoder.setCompression(new us.bringardner.net.ssh.algorithms.ZlibCompression(outComp));
+				}
+			}
 			if( strictKex ) {
 				encoder.resetSequence();
 			}
@@ -584,8 +597,49 @@ public abstract class SshTransport extends BaseObject implements INioHandler {
 		List<SshBuffer> tmp = new ArrayList<SshBuffer>(queued);
 		queued.clear();
 		for (SshBuffer b : tmp) {
-			writePacket(b);
+			if( b == START_COMPRESSION ) {
+				startOutputCompression();
+			} else {
+				writePacket(b);
+			}
 		}
+	}
+
+	private void startOutputCompression() {
+		if( delayedOut != null ) {
+			encoder.setCompression(new us.bringardner.net.ssh.algorithms.ZlibCompression(delayedOut));
+			delayedOut = null;
+		}
+	}
+
+	/**
+	 * The user is authenticated: start zlib@openssh.com if it was negotiated. A server calls 
+	 * this right after sending USERAUTH_SUCCESS, a client when it receives it (on the handler 
+	 * thread): the packets after it are compressed in both directions.
+	 */
+	protected void startDelayedCompression() {
+		lock.lock();
+		try {
+			if( delayedIn != null ) {
+				decoder.setCompression(new us.bringardner.net.ssh.algorithms.ZlibCompression(delayedIn));
+				delayedIn = null;
+			}
+			if( outputBlocked ) {
+				// USERAUTH_SUCCESS waits for a key exchange: compress what comes after it
+				queued.add(START_COMPRESSION);
+			} else {
+				startOutputCompression();
+			}
+		} finally {
+			lock.unlock();
+		}
+	}
+
+	/**
+	 * @return true if packets in each direction are compressed now: {out, in}
+	 */
+	public boolean[] isCompressing() {
+		return new boolean[] {encoder.isCompressing(), decoder.isCompressing()};
 	}
 
 	private void receivedNewKeys() throws SshException {
@@ -595,6 +649,14 @@ public abstract class SshTransport extends BaseObject implements INioHandler {
 		decoder.setKeys(pendingInCipher, pendingInMac);
 		if( strictKex ) {
 			decoder.resetSequence();
+		}
+		String inComp = client ? pendingNegotiated.getCompressionServerToClient() : pendingNegotiated.getCompressionClientToServer();
+		if( !decoder.isCompressing() && !"none".equals(inComp) ) {
+			if( us.bringardner.net.ssh.algorithms.ZlibCompression.ZLIB_OPENSSH.equals(inComp) ) {
+				delayedIn = inComp;
+			} else {
+				decoder.setCompression(new us.bringardner.net.ssh.algorithms.ZlibCompression(inComp));
+			}
 		}
 		pendingIn = false;
 		pendingInCipher = null;

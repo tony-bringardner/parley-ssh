@@ -64,4 +64,11 @@ public interface ISignatureAlgorithm {
 	 * @return the signature blob (string algorithm name, string signature)
 	 */
 	byte[] sign(PrivateKey key, byte[] data) throws GeneralSecurityException;
+
+	/**
+	 * @return true if this JVM can run it (ssh-ed25519 needs Java 15); unsupported algorithms aren't offered
+	 */
+	default boolean isSupported() {
+		return true;
+	}
 }

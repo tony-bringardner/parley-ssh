@@ -66,13 +66,14 @@ import javax.crypto.spec.SecretKeySpec;
 
 import us.bringardner.net.ssh.SshBuffer;
 import us.bringardner.net.ssh.SshException;
+import us.bringardner.net.ssh.algorithms.Ed25519;
 import us.bringardner.net.ssh.algorithms.SshPublicKeys;
 
 /**
  * Loads key pairs for public key authentication (and later server host keys) from the files
  * ssh-keygen and OpenSSL write:
  * <ul>
- * <li>OpenSSH ("BEGIN OPENSSH PRIVATE KEY", ssh-keygen's default), unencrypted</li>
+ * <li>OpenSSH ("BEGIN OPENSSH PRIVATE KEY", ssh-keygen's default), plain or passphrase protected</li>
  * <li>PKCS#8 ("BEGIN PRIVATE KEY", and "BEGIN ENCRYPTED PRIVATE KEY" with PBES2:
  * PBKDF2 and AES-CBC, as ssh-keygen -m PKCS8 and OpenSSL write)</li>
  * <li>Traditional PEM ("BEGIN RSA PRIVATE KEY", "BEGIN EC PRIVATE KEY"), plain or with a
@@ -88,6 +89,7 @@ public final class SshKeyLoader {
 
 	private static final String OID_RSA = "1.2.840.113549.1.1.1";
 	private static final String OID_EC = "1.2.840.10045.2.1";
+	private static final String OID_ED25519 = "1.3.101.112";
 	private static final String OID_PBES2 = "1.2.840.113549.1.5.13";
 	private static final String OID_PBKDF2 = "1.2.840.113549.1.5.12";
 	private static final Map<String, String> CURVES = new LinkedHashMap<String, String>();
@@ -129,7 +131,7 @@ public final class SshKeyLoader {
 		try {
 			switch (pem.type) {
 			case "OPENSSH PRIVATE KEY":
-				return openSsh(pem.body);
+				return openSsh(pem.body, passphrase);
 			case "PRIVATE KEY":
 				return pkcs8(pem.body);
 			case "ENCRYPTED PRIVATE KEY":
@@ -203,7 +205,7 @@ public final class SshKeyLoader {
 	public static List<KeyPair> defaultIdentities() {
 		File dir = new File(System.getProperty("user.home"), ".ssh");
 		List<KeyPair> ret = new ArrayList<KeyPair>();
-		for (String name : new String[] {"id_ecdsa", "id_rsa"}) {
+		for (String name : new String[] {"id_ed25519", "id_ecdsa", "id_rsa"}) {
 			File f = new File(dir, name);
 			try {
 				if( f.canRead() ) {
@@ -228,7 +230,7 @@ public final class SshKeyLoader {
 
 	// ------------------------------------------------------------------ OpenSSH (PROTOCOL.key)
 
-	private static KeyPair openSsh(byte[] data) throws IOException, GeneralSecurityException {
+	private static KeyPair openSsh(byte[] data, char[] passphrase) throws IOException, GeneralSecurityException {
 		if( data.length < OPENSSH_MAGIC.length || !Arrays.equals(OPENSSH_MAGIC, Arrays.copyOf(data, OPENSSH_MAGIC.length)) ) {
 			throw new SshException("Not an OpenSSH private key");
 		}
@@ -236,18 +238,18 @@ public final class SshKeyLoader {
 		b.skip(OPENSSH_MAGIC.length);
 		String cipher = b.getStringUtf8();
 		String kdf = b.getStringUtf8();
-		b.getString();
-		if( !"none".equals(cipher) || !"none".equals(kdf) ) {
-			throw new SshException("Passphrase protected OpenSSH keys ("+cipher+"/"+kdf+") are not supported yet; "
-					+"convert the key with 'ssh-keygen -p -m PEM -f file'");
-		}
+		byte[] kdfOptions = b.getString();
 		if( b.getInt() != 1 ) {
 			throw new SshException("Only OpenSSH key files with one key are supported");
 		}
 		b.getString();
-		SshBuffer p = new SshBuffer(b.getString());
+		byte[] section = b.getString();
+		if( !"none".equals(cipher) ) {
+			section = decryptOpenSsh(cipher, kdf, kdfOptions, section, need(passphrase));
+		}
+		SshBuffer p = new SshBuffer(section);
 		if( p.getUInt() != p.getUInt() ) {
-			throw new SshException("Corrupt OpenSSH private key");
+			throw new SshException("none".equals(cipher) ? "Corrupt OpenSSH private key" : "Wrong passphrase");
 		}
 		String type = p.getStringUtf8();
 		if( SshPublicKeys.SSH_RSA.equals(type) ) {
@@ -266,7 +268,60 @@ public final class SshKeyLoader {
 			BigInteger d = p.getMpint();
 			return ec(params, d, w);
 		}
-		throw new SshException("Unsupported key type "+type+" (supported: RSA and ECDSA nistp256/384/521)");
+		if( Ed25519.SSH_ED25519.equals(type) ) {
+			if( !Ed25519.isSupported() ) {
+				throw new SshException("ssh-ed25519 keys need Java 15 or later");
+			}
+			byte[] pub = p.getString();
+			byte[] priv = p.getString();
+			// 64 bytes: the seed, then the public key again
+			if( priv.length != 64 || !Arrays.equals(pub, Arrays.copyOfRange(priv, 32, 64)) ) {
+				throw new SshException("Corrupt ssh-ed25519 private key");
+			}
+			return new KeyPair(Ed25519.publicKey(pub), Ed25519.privateKey(Arrays.copyOf(priv, 32)));
+		}
+		throw new SshException("Unsupported key type "+type+" (supported: RSA, ECDSA nistp256/384/521, Ed25519 on Java 15+)");
+	}
+
+	/**
+	 * The private section of a passphrase protected OpenSSH key: bcrypt_pbkdf makes the key 
+	 * and IV of an AES cipher (ssh-keygen's default is aes256-ctr).
+	 */
+	private static byte[] decryptOpenSsh(String cipher, String kdf, byte[] kdfOptions, byte[] data, char[] passphrase)
+			throws IOException, GeneralSecurityException {
+		if( !"bcrypt".equals(kdf) ) {
+			throw new SshException("Unsupported key derivation "+kdf);
+		}
+		int keySize;
+		String transform;
+		switch (cipher) {
+		case "aes128-ctr": keySize = 16; transform = "AES/CTR/NoPadding"; break;
+		case "aes192-ctr": keySize = 24; transform = "AES/CTR/NoPadding"; break;
+		case "aes256-ctr": keySize = 32; transform = "AES/CTR/NoPadding"; break;
+		case "aes128-cbc": keySize = 16; transform = "AES/CBC/NoPadding"; break;
+		case "aes192-cbc": keySize = 24; transform = "AES/CBC/NoPadding"; break;
+		case "aes256-cbc": keySize = 32; transform = "AES/CBC/NoPadding"; break;
+		default: throw new SshException("Unsupported key cipher "+cipher+" (supported: aes-ctr, aes-cbc)");
+		}
+		SshBuffer o = new SshBuffer(kdfOptions);
+		byte[] salt = o.getString();
+		int rounds = o.getInt();
+		if( rounds < 1 || rounds > 100_000 ) {
+			throw new SshException("Unreasonable bcrypt rounds "+rounds);
+		}
+		if( data.length % 16 != 0 ) {
+			throw new SshException("Corrupt encrypted OpenSSH key");
+		}
+		byte[] pass = new String(passphrase).getBytes(StandardCharsets.UTF_8);
+		byte[] keyIv = BcryptPbkdf.derive(pass, salt, rounds, keySize+16);
+		Arrays.fill(pass, (byte) 0);
+		try {
+			Cipher c = Cipher.getInstance(transform);
+			c.init(Cipher.DECRYPT_MODE, new SecretKeySpec(keyIv, 0, keySize, "AES"), new IvParameterSpec(keyIv, keySize, 16));
+			return c.doFinal(data);
+		} finally {
+			Arrays.fill(keyIv, (byte) 0);
+		}
 	}
 
 	// ------------------------------------------------------------------ PKCS#8, PKCS#1, SEC1
@@ -284,6 +339,9 @@ public final class SshKeyLoader {
 		}
 		if( OID_EC.equals(oid) ) {
 			return sec1(info.octetString(), curve(alg));
+		}
+		if( OID_ED25519.equals(oid) ) {
+			throw new SshException("PKCS#8 Ed25519 keys have no public key: use the OpenSSH format (ssh-keygen's default for Ed25519)");
 		}
 		throw new SshException("Unsupported key algorithm "+oid);
 	}

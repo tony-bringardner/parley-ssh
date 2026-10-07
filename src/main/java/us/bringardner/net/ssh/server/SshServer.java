@@ -52,7 +52,8 @@ import us.bringardner.net.ssh.transport.SshTransport;
  * users in with the same access control list.
  * <p>
  * <b>What it runs</b> is up to the plug-ins: {@link #setCommandFactory(ICommandFactory)} for
- * exec, {@link #setShellFactory(IShellFactory)} for an interactive shell,
+ * exec, {@link #setShellFactory(IShellFactory)} (or the {@value #PROPERTY_SHELL_FACTORY}
+ * property) for an interactive shell,
  * {@link #addSubsystem(ISubsystemFactory)} for subsystems such as SFTP. Without them those
  * requests are refused. With an access control list, a user also needs the permission
  * ("exec", "shell", or the subsystem name).
@@ -81,6 +82,8 @@ import us.bringardner.net.ssh.transport.SshTransport;
 public class SshServer extends NioServer {
 
 	public static final String PROPERTY_HOST_KEY_DIR = "HostKeyDir";
+	/** Class name of the {@link IShellFactory} to use (public no-argument constructor), e.g. us.bringardner.net.ssh.shell.BjlShellFactory */
+	public static final String PROPERTY_SHELL_FACTORY = "ShellFactory";
 	public static final int DEFAULT_MAX_AUTH_TRIES = 6;
 	public static final long DEFAULT_LOGIN_GRACE_TIME = 120000;
 	public static final long DEFAULT_AUTH_FAILURE_DELAY = 250;
@@ -97,12 +100,14 @@ public class SshServer extends NioServer {
 	private volatile IPublicKeyAuthenticator publicKeyAuthenticator;
 	private volatile ICommandFactory commandFactory;
 	private volatile IShellFactory shellFactory;
+	private volatile boolean shellFactoryConfigured;
 	private final Map<String, ISubsystemFactory> subsystems = new ConcurrentHashMap<String, ISubsystemFactory>();
 	private volatile String banner;
 	private volatile int maxAuthTries = DEFAULT_MAX_AUTH_TRIES;
 	private volatile long loginGraceTime = DEFAULT_LOGIN_GRACE_TIME;
 	private volatile long authFailureDelay = DEFAULT_AUTH_FAILURE_DELAY;
 	private volatile int maxChannelsPerSession = 10;
+	private volatile IForwardingFilter forwardingFilter;
 
 	public SshServer() {
 		this(22);
@@ -122,18 +127,25 @@ public class SshServer extends NioServer {
 	}
 
 	/**
-	 * Read the host keys, then start.
+	 * Read the host keys and the configured shell, then start.
 	 *
-	 * @throws IOException if there are no host keys (or they can't be read), or the server doesn't start
+	 * @throws IOException if there are no host keys (or they can't be read), the
+	 * {@value #PROPERTY_SHELL_FACTORY} property names a class that can't be made, or the server doesn't start
 	 */
 	@Override
 	public void startAndWait(long timeoutMillis) throws IOException {
 		loadHostKeys();
+		try {
+			getShellFactory();
+		} catch (IllegalStateException e) {
+			throw new IOException(e.getMessage(), e.getCause());
+		}
 		super.startAndWait(timeoutMillis);
 	}
 
 	/**
-	 * Read the host keys, then start; a problem with them is logged and the server doesn't start.
+	 * Read the host keys and the configured shell, then start; a problem with them is logged and
+	 * the server doesn't start.
 	 */
 	@Override
 	public synchronized void start() {
@@ -144,6 +156,12 @@ public class SshServer extends NioServer {
 				logError("Can't load the host keys, server "+getName()+" not started", e);
 				return;
 			}
+		}
+		try {
+			getShellFactory();
+		} catch (IllegalStateException e) {
+			logError("Server "+getName()+" not started: "+e.getMessage());
+			return;
 		}
 		super.start();
 	}
@@ -248,15 +266,41 @@ public class SshServer extends NioServer {
 		this.commandFactory = factory;
 	}
 
+	/**
+	 * @return the factory set with {@link #setShellFactory(IShellFactory)}, else one made from
+	 * the {@value #PROPERTY_SHELL_FACTORY} property, else null (shell requests are refused)
+	 * @throws IllegalStateException if the property names a class that can't be made
+	 */
 	public IShellFactory getShellFactory() {
+		if( shellFactory == null && !shellFactoryConfigured ) {
+			synchronized (this) {
+				if( shellFactory == null && !shellFactoryConfigured ) {
+					String tmp = getProperty(PROPERTY_SHELL_FACTORY);
+					if( tmp != null && !tmp.trim().isEmpty() ) {
+						try {
+							Class<?> c = Class.forName(tmp.trim());
+							shellFactory = (IShellFactory) c.getDeclaredConstructor().newInstance();
+						} catch (Exception e) {
+							logError("Can't configure shell factory class='"+tmp+"'", e);
+							throw new IllegalStateException("Can't configure shell factory class='"+tmp+"'", e);
+						}
+					} else {
+						logInfo("No shell defined in server "+getName());
+					}
+					shellFactoryConfigured = true;
+				}
+			}
+		}
 		return shellFactory;
 	}
 
 	/**
-	 * @param factory runs "shell" requests; null (default) refuses them
+	 * @param factory runs "shell" requests; null to look at the {@value #PROPERTY_SHELL_FACTORY}
+	 * property again on the next use (with no property, shell requests are refused)
 	 */
 	public void setShellFactory(IShellFactory factory) {
 		this.shellFactory = factory;
+		this.shellFactoryConfigured = factory != null;
 	}
 
 	public void addSubsystem(ISubsystemFactory factory) {
@@ -351,6 +395,17 @@ public class SshServer extends NioServer {
 	 */
 	public void setAuthFailureDelay(long milliSeconds) {
 		this.authFailureDelay = milliSeconds;
+	}
+
+	public IForwardingFilter getForwardingFilter() {
+		return forwardingFilter;
+	}
+
+	/**
+	 * @param filter which port forwarding users may do; null (default) refuses all of it
+	 */
+	public void setForwardingFilter(IForwardingFilter filter) {
+		this.forwardingFilter = filter;
 	}
 
 	public int getMaxChannelsPerSession() {
