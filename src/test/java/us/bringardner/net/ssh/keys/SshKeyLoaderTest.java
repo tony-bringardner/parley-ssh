@@ -131,4 +131,33 @@ public class SshKeyLoaderTest {
 		assertEquals(1, keys.size());
 		assertEquals("ssh-rsa", SshPublicKeys.keyType(keys.get(0).getPublic()));
 	}
+
+	/** What SshKeyWriter writes loads again, and ssh-keygen reads it (prints the same public key) */
+	@Test
+	public void writerRoundTrip() throws Exception {
+		KeyPairGenerator rg = KeyPairGenerator.getInstance("RSA");
+		rg.initialize(2048);
+		KeyPairGenerator eg = KeyPairGenerator.getInstance("EC");
+		for (String curve : new String[] {"secp256r1", "secp384r1", "secp521r1"}) {
+			eg.initialize(new ECGenParameterSpec(curve));
+			roundTrip(eg.generateKeyPair());
+		}
+		roundTrip(rg.generateKeyPair());
+	}
+
+	private void roundTrip(KeyPair kp) throws Exception {
+		for (boolean openSsh : new boolean[] {true, false}) {
+			File f = new File(dir, "w"+System.nanoTime());
+			us.bringardner.net.ssh.keys.SshKeyWriter.write(kp, f, "round trip", openSsh);
+			KeyPair back = SshKeyLoader.load(f, null);
+			assertArrayEquals(SshPublicKeys.encode(kp.getPublic()), SshPublicKeys.encode(back.getPublic()));
+			check(f, back);
+			if( haveKeygen() ) {
+				Process p = new ProcessBuilder("ssh-keygen", "-y", "-f", f.getPath()).redirectErrorStream(true).start();
+				String out = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();
+				assertEquals(0, p.waitFor(), out);
+				assertEquals(SshPublicKeys.toOpenSsh(kp.getPublic()), out.split(" ")[0]+" "+out.split(" ")[1], (openSsh ? "OpenSSH" : "PKCS#8")+" read by ssh-keygen");
+			}
+		}
+	}
 }

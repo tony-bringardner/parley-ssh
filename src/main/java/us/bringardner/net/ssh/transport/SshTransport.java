@@ -132,6 +132,8 @@ public abstract class SshTransport extends BaseObject implements INioHandler {
 	private final List<SshBuffer> queued = new ArrayList<SshBuffer>();
 	private final List<CompletableFuture<Void>> kexWaiters = new ArrayList<CompletableFuture<Void>>();
 	private volatile Map<String, byte[]> peerExtensions = Collections.emptyMap();
+	// The peer's first KEXINIT offered ext-info-c / ext-info-s (RFC 8308)
+	private volatile boolean peerAcceptsExtInfo;
 
 	private volatile boolean disconnecting;
 	private volatile boolean closed;
@@ -215,6 +217,14 @@ public abstract class SshTransport extends BaseObject implements INioHandler {
 	 */
 	protected boolean isAutomaticRekeyAllowed() {
 		return true;
+	}
+
+	/**
+	 * @return the SSH_MSG_EXT_INFO to send after the first NEWKEYS if the peer accepts it 
+	 * (a server's server-sig-algs), or null for none
+	 */
+	protected SshBuffer getExtInfo() {
+		return null;
 	}
 
 	/**
@@ -486,6 +496,7 @@ public abstract class SshTransport extends BaseObject implements INioHandler {
 			if( strictKex && decoder.getLastSequence() != 0 ) {
 				throw new SshException("Strict key exchange: KEXINIT was not the first packet");
 			}
+			peerAcceptsExtInfo = peerProposal.get(KexProposal.KEX).contains(client ? SshConstants.EXT_INFO_SERVER : SshConstants.EXT_INFO_CLIENT);
 		}
 		pendingNegotiated = NegotiatedAlgorithms.negotiate(c, s, algorithms);
 		logDebug(() -> "Negotiated "+pendingNegotiated+(strictKex ? " (strict)" : ""));
@@ -552,6 +563,13 @@ public abstract class SshTransport extends BaseObject implements INioHandler {
 			encoder.setKeys(outCipher, outMac);
 			if( strictKex ) {
 				encoder.resetSequence();
+			}
+			if( !firstKexDone && peerAcceptsExtInfo ) {
+				// RFC 8308: the next packet after the first NEWKEYS
+				SshBuffer ext = getExtInfo();
+				if( ext != null ) {
+					writePacket(ext);
+				}
 			}
 			pendingInCipher = inCipher;
 			pendingInMac = inMac;

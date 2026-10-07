@@ -95,7 +95,8 @@ public abstract class SshChannel {
 	private final Buffer extended = new Buffer();
 	private final ChannelInputStream in = new ChannelInputStream(data);
 	private final ChannelInputStream err = new ChannelInputStream(extended);
-	private final ChannelOutputStream out = new ChannelOutputStream();
+	private final ChannelOutputStream out = new ChannelOutputStream(false);
+	private final ChannelOutputStream errOut = new ChannelOutputStream(true);
 
 	/**
 	 * @param type the channel type, e.g. "session"
@@ -128,6 +129,14 @@ public abstract class SshChannel {
 	 */
 	protected boolean handleRequest(String request, boolean wantReply, SshBuffer data) throws IOException {
 		return false;
+	}
+
+	/**
+	 * After a request from the peer was answered (or right after handleRequest when no 
+	 * reply was asked for): a server starts the command here, so its output can't overtake 
+	 * the reply.
+	 */
+	protected void onRequestDone(String request, boolean success) throws IOException {
 	}
 
 	/**
@@ -210,6 +219,14 @@ public abstract class SshChannel {
 	 */
 	public OutputStream getOutputStream() {
 		return out;
+	}
+
+	/**
+	 * Extended data to the peer (SSH_EXTENDED_DATA_STDERR): a server's stderr. It shares the 
+	 * window with {@link #getOutputStream()}; closing it does nothing (EOF ends both).
+	 */
+	public OutputStream getExtendedOutputStream() {
+		return errOut;
 	}
 
 	/**
@@ -499,6 +516,7 @@ public abstract class SshChannel {
 				lock.unlock();
 			}
 		}
+		onRequestDone(request, ok);
 	}
 
 	void receivedReply(boolean success) throws SshException {
@@ -631,6 +649,11 @@ public abstract class SshChannel {
 	}
 
 	private final class ChannelOutputStream extends OutputStream {
+		private final boolean extended;
+
+		ChannelOutputStream(boolean extended) {
+			this.extended = extended;
+		}
 
 		@Override
 		public void write(int b) throws IOException {
@@ -655,7 +678,11 @@ public abstract class SshChannel {
 						throw f instanceof IOException ? (IOException) f : new ClosedChannelException();
 					}
 					int n = (int) Math.min(len, Math.min(remoteWindow, remoteMaxPacket));
-					service.send(SshBuffer.message(SshConstants.SSH_MSG_CHANNEL_DATA).putInt(remoteId).putString(b, off, n));
+					if( extended ) {
+						service.send(SshBuffer.message(SshConstants.SSH_MSG_CHANNEL_EXTENDED_DATA).putInt(remoteId).putInt(1).putString(b, off, n));
+					} else {
+						service.send(SshBuffer.message(SshConstants.SSH_MSG_CHANNEL_DATA).putInt(remoteId).putString(b, off, n));
+					}
 					remoteWindow -= n;
 					off += n;
 					len -= n;
@@ -667,7 +694,9 @@ public abstract class SshChannel {
 
 		@Override
 		public void close() throws IOException {
-			sendEof();
+			if( !extended ) {
+				sendEof();
+			}
 		}
 	}
 
