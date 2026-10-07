@@ -1,0 +1,199 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+	<artifactId>bjl_net_ssh</artifactId>
+	<name>BjlNetSsh</name>
+	<groupId>us.bringardner</groupId>
+	<version>1.0.0-SNAPSHOT</version>
+
+	<description>
+	Implementation of SSH Server
+	</description>
+
+	<properties>
+		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+		<project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+		<maven.compiler.release>11</maven.compiler.release>
+		<junit.version>5.11.4</junit.version>
+		<log4j.version>2.24.3</log4j.version>
+		<jacoco.version>0.8.15</jacoco.version>
+	</properties>
+
+	<build>
+		<!-- <sourceDirectory>src</sourceDirectory> -->
+		<testResources>
+			<testResource>
+				<directory>src/test/resources</directory>
+			</testResource>
+			<!-- Example logging configurations (log4j2.xml, JulLogging.properties) used by the logger tests.
+			     They are test resources only so they are not packaged in the library jar. -->
+			<testResource>
+				<directory>resources</directory>
+			</testResource>
+		</testResources>
+
+		<plugins>
+			<!-- Tests named *IT run in 'mvn verify', against the built jar -->
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-failsafe-plugin</artifactId>
+				<version>3.5.2</version>
+				<executions>
+					<execution>
+						<goals>
+							<goal>integration-test</goal>
+							<goal>verify</goal>
+						</goals>
+					</execution>
+				</executions>
+			</plugin>
+			<!-- Plugins listed only in pluginManagement are NOT executed, so the source jar is declared here. -->
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-source-plugin</artifactId>
+			</plugin>
+			<!-- A fixed module name for projects that use Java modules (no module-info.java needed) -->
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-jar-plugin</artifactId>
+				<version>3.4.2</version>
+				<configuration>
+					<archive>
+						<manifestEntries>
+							<Automatic-Module-Name>us.bringardner.net.ssh</Automatic-Module-Name>
+						</manifestEntries>
+					</archive>
+				</configuration>
+			</plugin>
+			<!-- Code coverage: 'mvn verify' writes the report to target/site/jacoco/index.html -->
+			<plugin>
+				<groupId>org.jacoco</groupId>
+				<artifactId>jacoco-maven-plugin</artifactId>
+			</plugin>
+		</plugins>
+
+		<pluginManagement>
+			<plugins>
+				<plugin>
+					<groupId>org.apache.maven.plugins</groupId>
+					<artifactId>maven-compiler-plugin</artifactId>
+					<version>3.13.0</version>
+					<configuration>
+						<release>${maven.compiler.release}</release>
+					</configuration>
+				</plugin>
+
+				<plugin>
+					<groupId>org.apache.maven.plugins</groupId>
+					<artifactId>maven-source-plugin</artifactId>
+					<version>3.3.1</version>
+					<executions>
+						<execution>
+							<id>attach-sources</id>
+							<goals>
+								<goal>jar-no-fork</goal>
+							</goals>
+							<!-- package (not deploy) so the source jar is attached BEFORE the deploy plugin runs -->
+							<phase>package</phase>
+							<configuration>
+								<skipSource>false</skipSource>
+								<attach>true</attach>
+							</configuration>
+						</execution>
+					</executions>
+				</plugin>
+				<plugin>
+					<groupId>org.apache.maven.plugins</groupId>
+					<artifactId>maven-deploy-plugin</artifactId>
+					<version>3.1.4</version>
+				</plugin>
+				<plugin>
+					<groupId>org.apache.maven.plugins</groupId>
+					<artifactId>maven-surefire-plugin</artifactId>
+					<version>3.5.2</version>
+					<!-- If an argLine is ever added here, write it as <argLine>@{argLine} ...</argLine>
+					     so it does not replace the JaCoCo agent set by prepare-agent. -->
+				</plugin>
+
+				<plugin>
+					<groupId>org.jacoco</groupId>
+					<artifactId>jacoco-maven-plugin</artifactId>
+					<version>${jacoco.version}</version>
+					<executions>
+						<!-- Attaches the JaCoCo agent to the surefire test JVM -->
+						<execution>
+							<id>prepare-agent</id>
+							<goals>
+								<goal>prepare-agent</goal>
+							</goals>
+						</execution>
+						<!-- HTML, XML and CSV reports in target/site/jacoco -->
+						<execution>
+							<id>report</id>
+							<phase>verify</phase>
+							<goals>
+								<goal>report</goal>
+							</goals>
+						</execution>
+					</executions>
+				</plugin>
+			</plugins>
+		</pluginManagement>
+	</build>
+
+	<distributionManagement>
+		<repository>
+			<id>github</id>
+			<name>tony-bringardner</name>
+			<url>https://maven.pkg.github.com/tony-bringardner/BjlSsh</url>
+		</repository>
+
+	</distributionManagement>
+
+	<url>http://bringardner.us/BJL/BjlSsh</url>
+	<inceptionYear>2026</inceptionYear>
+
+	<licenses>
+		<license>
+			<name>Apache License, Version 2.0</name>
+			<url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+			<distribution>repo</distribution>
+		</license>
+	</licenses>
+
+	<scm>
+		<url>https://github.com/tony-bringardner/BjlSsh</url>
+		<connection>scm:git:https://github.com/tony-bringardner/BjlSsh.git</connection>
+		<developerConnection>scm:git:https://github.com/tony-bringardner/BjlSsh.git</developerConnection>
+	</scm>
+
+	<dependencies>
+		<dependency>
+			<groupId>us.bringardner</groupId>
+			<artifactId>bjl_net_framework</artifactId>
+			<version>1.1.0-SNAPSHOT</version>
+		</dependency>
+		<!-- log4j is only used for testing, Log4JLogger accesses it by reflection at runtime.
+		     2.13.2 was vulnerable to Log4Shell (CVE-2021-44228). -->
+		<dependency>
+			<groupId>org.apache.logging.log4j</groupId>
+			<artifactId>log4j-api</artifactId>
+			<version>${log4j.version}</version>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.logging.log4j</groupId>
+			<artifactId>log4j-core</artifactId>
+			<version>${log4j.version}</version>
+			<scope>test</scope>
+		</dependency>
+		<!-- junit-jupiter includes the API (to compile tests) and the engine (to run them) -->
+		<dependency>
+			<groupId>org.junit.jupiter</groupId>
+			<artifactId>junit-jupiter</artifactId>
+			<version>${junit.version}</version>
+			<scope>test</scope>
+		</dependency>
+	</dependencies>
+</project>
