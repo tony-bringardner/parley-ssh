@@ -169,6 +169,7 @@
 	</scm>
 
 	<dependencies>
+		<!-- The SSH server is built on the framework's non-blocking nio package -->
 		<dependency>
 			<groupId>us.bringardner</groupId>
 			<artifactId>bjl_net_framework</artifactId>
