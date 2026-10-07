@@ -131,6 +131,18 @@ public abstract class SshChannel {
 	}
 
 	/**
+	 * Take the peer's data as it arrives instead of through the streams (e.g. a protocol 
+	 * parser like SFTP's, so it needs no reader thread). Called on the handler thread, it must 
+	 * not block. Data taken here counts as read: the window opens again at once.
+	 * 
+	 * @param ext true for extended data (stderr)
+	 * @return true if taken, false to buffer it for the streams (the default)
+	 */
+	protected boolean onData(byte[] buf, int off, int len, boolean ext) throws IOException {
+		return false;
+	}
+
+	/**
 	 * The channel is open (both sides).
 	 */
 	protected void onOpen() {
@@ -391,7 +403,7 @@ public abstract class SshChannel {
 		finish(reason);
 	}
 
-	void receivedData(byte[] buf, int off, int len, boolean ext) throws SshException {
+	void receivedData(byte[] buf, int off, int len, boolean ext) throws IOException {
 		lock.lock();
 		try {
 			if( eofReceived || closeReceived ) {
@@ -404,10 +416,33 @@ public abstract class SshChannel {
 				throw new SshException("Channel data packet too large ("+len+" > "+localMaxPacket+")");
 			}
 			localWindow -= len;
-			(ext ? extended : data).add(buf, off, len);
-			changed.signalAll();
 		} finally {
 			lock.unlock();
+		}
+		boolean taken = onData(buf, off, len, ext);
+		lock.lock();
+		try {
+			if( taken ) {
+				adjustWindow();
+			} else {
+				(ext ? extended : data).add(buf, off, len);
+				changed.signalAll();
+			}
+		} finally {
+			lock.unlock();
+		}
+	}
+
+	/**
+	 * Open the window again once less than half of it is left for the peer, counting data 
+	 * not yet read. Called with the lock held.
+	 */
+	private void adjustWindow() throws IOException {
+		long buffered = data.size()+extended.size();
+		if( state == State.OPEN && !closeSent && localWindow+buffered < localMaxWindow/2 ) {
+			long adjust = localMaxWindow-localWindow-buffered;
+			localWindow += adjust;
+			service.send(SshBuffer.message(SshConstants.SSH_MSG_CHANNEL_WINDOW_ADJUST).putInt(remoteId).putInt(adjust));
 		}
 	}
 
@@ -527,7 +562,6 @@ public abstract class SshChannel {
 	 * @return bytes read, -1 at the end
 	 */
 	private int readSome(Buffer from, byte[] b, int off, int len, boolean block) throws IOException {
-		long adjust = 0;
 		int n;
 		lock.lock();
 		try {
@@ -547,12 +581,7 @@ public abstract class SshChannel {
 			}
 			n = from.take(b, off, len);
 			// The window is opened as the data is consumed, not as it arrives
-			long buffered = data.size()+extended.size();
-			if( state == State.OPEN && !closeSent && localWindow+buffered < localMaxWindow/2 ) {
-				adjust = localMaxWindow-localWindow-buffered;
-				localWindow += adjust;
-				service.send(SshBuffer.message(SshConstants.SSH_MSG_CHANNEL_WINDOW_ADJUST).putInt(remoteId).putInt(adjust));
-			}
+			adjustWindow();
 		} finally {
 			lock.unlock();
 		}
