@@ -364,6 +364,26 @@ public class SshServer extends NioServer {
 		return random;
 	}
 
+	/**
+	 * @return false: SSH encrypts itself, so the port never speaks TLS (the inherited "secure"
+	 * property, meant for TLS servers, is ignored)
+	 */
+	@Override
+	public boolean isSecure() {
+		return false;
+	}
+
+	/**
+	 * @throws IllegalArgumentException for true: an SSH server can't speak TLS
+	 */
+	@Override
+	public synchronized void setSecure(boolean secure) {
+		if( secure ) {
+			throw new IllegalArgumentException("SSH encrypts itself: an SSH server can't use TLS");
+		}
+		super.setSecure(false);
+	}
+
 	public IHostKeyProvider getHostKeyProvider() {
 		return hostKeyProvider;
 	}

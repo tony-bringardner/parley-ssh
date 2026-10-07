@@ -327,6 +327,26 @@ public class ServerTest {
 		}
 	}
 
+	/** SSH never speaks TLS, whatever the "secure" property (meant for TLS servers) says */
+	@Test
+	public void secureNeverMeansTls() throws Exception {
+		System.setProperty("secure", "true");
+		System.setProperty(SshServer.class.getName()+".secure", "true");
+		try {
+			start().startAndWait(5000);
+			assertFalse(server.isSecure());
+			ClientSession s = connect(null);
+			s.authenticateAndWait("alice", new PasswordAuth("secret"));
+			assertEquals("alice", s.exec("whoami", null, 10000).getStdoutText());
+			s.close();
+			assertThrows(IllegalArgumentException.class, () -> server.setSecure(true));
+			server.setSecure(false);
+		} finally {
+			System.clearProperty("secure");
+			System.clearProperty(SshServer.class.getName()+".secure");
+		}
+	}
+
 	/** Made by name from the ShellFactory property */
 	public static class PropertyShell implements IShellFactory {
 		@Override

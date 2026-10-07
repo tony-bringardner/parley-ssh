@@ -81,6 +81,8 @@ public class SshClient extends BaseObject implements Closeable {
 	public SshClient() {
 		getLogger().setLevel(Server.getDefaultLogLevel());
 		nio = new NioClient("SshClient");
+		// SSH encrypts itself: never TLS, whatever a "secure" property says
+		nio.setSecure(false);
 		executor = Executors.newCachedThreadPool(NamedThreadFactory.numbered("SshClient-"));
 		nio.setHandlerExecutor(executor);
 		// The transport has its own limits, the framework's must not cut packets short
