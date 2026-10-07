@@ -2,19 +2,28 @@
 	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
 	xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
 	<modelVersion>4.0.0</modelVersion>
-	<artifactId>bjl_net_ssh</artifactId>
-	<name>BjlNetSsh</name>
-	<groupId>us.bringardner</groupId>
-	<version>1.0.0-SNAPSHOT</version>
+	<!-- License, developer, SCM, URL, Java level and the Maven Central release profile
+	     all come from parley-parent. -->
+	<parent>
+		<groupId>us.bringardner.parley</groupId>
+		<artifactId>parley-parent</artifactId>
+		<version>1.0.0-SNAPSHOT</version>
+		<relativePath>../parley-parent/pom.xml</relativePath>
+	</parent>
 
-	<description>
-	Implementation of SSH Server
-	</description>
+	<artifactId>parley-ssh</artifactId>
+	<version>1.0.0-SNAPSHOT</version>
+	<name>Parley SSH</name>
+	<description>An SSH library, client and server (RFC 4251-4254), built on parley-net's non-blocking
+		nio package, with an SFTP server subsystem that serves any parley-files FileSource.
+		Formerly us.bringardner:bjl_net_ssh.</description>
+	<inceptionYear>2026</inceptionYear>
 
 	<properties>
 		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 		<project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
-		<maven.compiler.release>11</maven.compiler.release>
+		<!-- Written to the jar manifest as Automatic-Module-Name (was us.bringardner.net.ssh) -->
+		<parley.moduleName>us.bringardner.parley.ssh</parley.moduleName>
 		<junit.version>5.11.4</junit.version>
 		<log4j.version>2.24.3</log4j.version>
 		<jacoco.version>0.8.15</jacoco.version>
@@ -52,19 +61,6 @@
 			<plugin>
 				<groupId>org.apache.maven.plugins</groupId>
 				<artifactId>maven-source-plugin</artifactId>
-			</plugin>
-			<!-- A fixed module name for projects that use Java modules (no module-info.java needed) -->
-			<plugin>
-				<groupId>org.apache.maven.plugins</groupId>
-				<artifactId>maven-jar-plugin</artifactId>
-				<version>3.4.2</version>
-				<configuration>
-					<archive>
-						<manifestEntries>
-							<Automatic-Module-Name>us.bringardner.net.ssh</Automatic-Module-Name>
-						</manifestEntries>
-					</archive>
-				</configuration>
 			</plugin>
 			<!-- Code coverage: 'mvn verify' writes the report to target/site/jacoco/index.html -->
 			<plugin>
@@ -142,45 +138,28 @@
 		</pluginManagement>
 	</build>
 
+	<!-- GitHub Packages, used by release.sh. Maven Central releases use: mvn -Prelease clean deploy -->
 	<distributionManagement>
 		<repository>
 			<id>github</id>
 			<name>tony-bringardner</name>
-			<url>https://maven.pkg.github.com/tony-bringardner/BjlSsh</url>
+			<url>https://maven.pkg.github.com/tony-bringardner/parley-ssh</url>
 		</repository>
-
 	</distributionManagement>
-
-	<url>http://bringardner.us/BJL/BjlSsh</url>
-	<inceptionYear>2026</inceptionYear>
-
-	<licenses>
-		<license>
-			<name>Apache License, Version 2.0</name>
-			<url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
-			<distribution>repo</distribution>
-		</license>
-	</licenses>
-
-	<scm>
-		<url>https://github.com/tony-bringardner/BjlSsh</url>
-		<connection>scm:git:https://github.com/tony-bringardner/BjlSsh.git</connection>
-		<developerConnection>scm:git:https://github.com/tony-bringardner/BjlSsh.git</developerConnection>
-	</scm>
 
 	<dependencies>
 		<!-- The SSH server is built on the framework's non-blocking nio package -->
 		<dependency>
-			<groupId>us.bringardner</groupId>
-			<artifactId>bjl_net_framework</artifactId>
-			<version>1.1.0-SNAPSHOT</version>
+			<groupId>us.bringardner.parley</groupId>
+			<artifactId>parley-net</artifactId>
+			<version>1.0.0-SNAPSHOT</version>
 		</dependency>
-		<!-- The SFTP server (us.bringardner.net.ssh.sftp.server) serves FileSource file systems.
+		<!-- The SFTP server (us.bringardner.parley.ssh.sftp.server) serves FileSource file systems.
 		     Optional: users of the client and of the server without SFTP don't need it -->
 		<dependency>
-			<groupId>us.bringardner</groupId>
-			<artifactId>bjl_file_system</artifactId>
-			<version>1.0.2-SNAPSHOT</version>
+			<groupId>us.bringardner.parley</groupId>
+			<artifactId>parley-files</artifactId>
+			<version>1.0.0-SNAPSHOT</version>
 			<optional>true</optional>
 		</dependency>
 		<!-- log4j is only used for testing, Log4JLogger accesses it by reflection at runtime.
