@@ -189,6 +189,13 @@
 			<version>${log4j.version}</version>
 			<scope>test</scope>
 		</dependency>
+		<!-- Apache MINA SSHD as the peer in interop tests (an embedded server); test scope only -->
+		<dependency>
+			<groupId>org.apache.sshd</groupId>
+			<artifactId>sshd-core</artifactId>
+			<version>2.19.0</version>
+			<scope>test</scope>
+		</dependency>
 		<!-- junit-jupiter includes the API (to compile tests) and the engine (to run them) -->
 		<dependency>
 			<groupId>org.junit.jupiter</groupId>
